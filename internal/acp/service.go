@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync"
 
+	"reasonix/internal/agent"
 	"reasonix/internal/control"
 	"reasonix/internal/event"
 	"reasonix/internal/plugin"
@@ -80,11 +81,13 @@ type service struct {
 	sessions map[string]*acpSession
 }
 
-// acpSession is one open session: its controller plus the cancel func of the
-// in-flight turn (nil when idle) so session/cancel can abort it.
+// acpSession is one open session: its controller, the on-disk transcript path
+// (empty when persistence is off), and the cancel func of the in-flight turn
+// (nil when idle) so session/cancel can abort it.
 type acpSession struct {
-	id   string
-	ctrl *control.Controller
+	id         string
+	ctrl       *control.Controller
+	transcript string
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -154,8 +157,16 @@ func (s *service) sessionNew(ctx context.Context, raw json.RawMessage) (any, err
 	ctrl.EnableInteractiveApproval()
 	sink.bindApprove(ctrl.Approve)
 
+	sess := &acpSession{id: id, ctrl: ctrl}
+	// Pin a transcript file when the controller has a session dir, so every turn
+	// auto-saves there and session/prompt can hand the path back to the client.
+	if dir := ctrl.SessionDir(); dir != "" {
+		sess.transcript = agent.NewSessionPath(dir, ctrl.Label())
+		ctrl.SetSessionPath(sess.transcript)
+	}
+
 	s.mu.Lock()
-	s.sessions[id] = &acpSession{id: id, ctrl: ctrl}
+	s.sessions[id] = sess
 	s.mu.Unlock()
 
 	return SessionNewResult{SessionID: id}, nil
@@ -185,6 +196,10 @@ func (s *service) sessionPrompt(ctx context.Context, raw json.RawMessage) (any, 
 	sess.setCancel(nil)
 	cancel()
 
+	// Persist after the turn (best-effort) so a crash loses at most this prompt;
+	// save even on cancel/error since the partial conversation is still resumable.
+	_ = sess.ctrl.Snapshot()
+
 	stop := StopEndTurn
 	if runErr != nil {
 		if runCtx.Err() != nil {
@@ -193,7 +208,11 @@ func (s *service) sessionPrompt(ctx context.Context, raw json.RawMessage) (any, 
 			stop = StopError
 		}
 	}
-	return SessionPromptResult{StopReason: stop}, nil
+	res := SessionPromptResult{StopReason: stop}
+	if sess.transcript != "" {
+		res.TranscriptPath = &sess.transcript
+	}
+	return res, nil
 }
 
 // sessionCancel aborts a session's in-flight turn, if any. It is a notification:
