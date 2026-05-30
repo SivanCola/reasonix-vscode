@@ -1,0 +1,149 @@
+package acp
+
+import (
+	"context"
+	"encoding/json"
+	"strconv"
+	"strings"
+
+	"reasonix/internal/event"
+)
+
+// notifier is the slice of Conn that the per-session adapters depend on: the
+// dispatch sink pushes session/update notifications, the approver makes a
+// session/request_permission request. Narrowing to this interface keeps both
+// unit-testable with a fake.
+type notifier interface {
+	Notify(method string, params any) error
+	Request(ctx context.Context, method string, params any) (json.RawMessage, error)
+}
+
+// maxResultChars clips a tool result before it crosses the wire, matching main's
+// dispatch.ts (the full result still goes to the model; this is display only).
+const maxResultChars = 8000
+
+// updateSink is an event.Sink bound to one session that maps the agent's typed
+// event stream onto ACP session/update notifications. It is the v2 counterpart of
+// main's dispatchKernelEvent: where main translated kernel events, we translate
+// the event.Event the v2 agent already emits.
+//
+// v2 has no separate "tool intent" event — a call goes ToolDispatch → ToolResult,
+// two states — so we emit a single pending tool_call on dispatch (already carrying
+// rawInput, which main only had by the intent step) and a completed/failed
+// tool_call_update on result. Message/Usage/Phase/TurnStarted have no place in
+// main's update set and are dropped.
+type updateSink struct {
+	conn      notifier
+	sessionID string
+}
+
+func newUpdateSink(conn notifier, sessionID string) *updateSink {
+	return &updateSink{conn: conn, sessionID: sessionID}
+}
+
+// Emit implements event.Sink. The agent calls it serially (see event.Sink), so no
+// locking is needed; write serialization lives in Conn.
+func (s *updateSink) Emit(e event.Event) {
+	switch e.Kind {
+	case event.Reasoning:
+		if e.Text == "" {
+			return
+		}
+		s.send(messageChunk{SessionUpdate: "agent_thought_chunk", Content: textBlock(e.Text)})
+
+	case event.Text:
+		if e.Text == "" {
+			return
+		}
+		s.send(messageChunk{SessionUpdate: "agent_message_chunk", Content: textBlock(e.Text)})
+
+	case event.ToolDispatch:
+		s.send(toolCall{
+			SessionUpdate: "tool_call",
+			ToolCallID:    e.Tool.ID,
+			Title:         e.Tool.Name,
+			Kind:          toolKindFor(e.Tool.Name),
+			Status:        "pending",
+			RawInput:      rawJSON(e.Tool.Args),
+		})
+
+	case event.ToolResult:
+		status := "completed"
+		text := e.Tool.Output
+		if e.Tool.Err != "" {
+			status = "failed"
+			text = e.Tool.Err
+		}
+		s.send(toolCallUpdateMsg{
+			SessionUpdate: "tool_call_update",
+			ToolCallID:    e.Tool.ID,
+			Status:        status,
+			Content:       []toolContent{{Type: "content", Content: textBlock(clip(text))}},
+		})
+
+	case event.Notice:
+		// Surface warnings to the host as a message chunk so they're not lost;
+		// info-level notices stay out of band.
+		if e.Level == event.LevelWarn && e.Text != "" {
+			s.send(messageChunk{
+				SessionUpdate: "agent_message_chunk",
+				Content:       textBlock("\n\n[warning] " + e.Text),
+			})
+		}
+	}
+}
+
+func (s *updateSink) send(update any) {
+	_ = s.conn.Notify("session/update", SessionUpdateParams{SessionID: s.sessionID, Update: update})
+}
+
+// textBlock builds a text content block.
+func textBlock(text string) ContentBlock { return ContentBlock{Type: "text", Text: text} }
+
+// rawJSON returns args as a raw JSON value when it is valid JSON, else nil so the
+// rawInput field is omitted rather than carrying a malformed payload.
+func rawJSON(args string) json.RawMessage {
+	if args == "" || !json.Valid([]byte(args)) {
+		return nil
+	}
+	return json.RawMessage(args)
+}
+
+// clip truncates text to maxResultChars, appending a note, matching dispatch.ts.
+func clip(text string) string {
+	if len(text) <= maxResultChars {
+		return text
+	}
+	return text[:maxResultChars] + "\n…(" +
+		strconv.Itoa(len(text)-maxResultChars) + " more chars truncated)"
+}
+
+// toolKindFor maps a tool name to the ACP tool kind the host uses to categorize
+// the call in its UI. The kinds match main's restricted set
+// (read/edit/search/execute/other). Known v2 built-ins map explicitly; anything
+// else (plugins, the task tool) falls back to a name heuristic, then "other".
+func toolKindFor(name string) string {
+	switch name {
+	case "read_file", "ls", "glob":
+		return "read"
+	case "grep":
+		return "search"
+	case "edit_file", "multiedit", "write_file":
+		return "edit"
+	case "bash":
+		return "execute"
+	}
+	n := strings.ToLower(name)
+	switch {
+	case strings.Contains(n, "search") || strings.Contains(n, "grep") || strings.Contains(n, "find"):
+		return "search"
+	case strings.Contains(n, "edit") || strings.Contains(n, "write") || strings.Contains(n, "replace"):
+		return "edit"
+	case strings.Contains(n, "read") || strings.Contains(n, "cat") || strings.Contains(n, "view"):
+		return "read"
+	case strings.Contains(n, "bash") || strings.Contains(n, "exec") || strings.Contains(n, "shell") || strings.Contains(n, "run"):
+		return "execute"
+	default:
+		return "other"
+	}
+}
