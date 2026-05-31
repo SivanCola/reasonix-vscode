@@ -56,6 +56,7 @@ export const en = {
   "status.switchFolder": "{cwd}\nClick to switch project folder",
   "status.tokens": "tokens",
   "status.cache": "cache {pct}%",
+  "status.cacheAvg": "avg {pct}%",
   "status.balanceTitle": "Wallet balance",
   "status.jobs": "{n} running",
   "status.jobsTitle": "Background jobs",

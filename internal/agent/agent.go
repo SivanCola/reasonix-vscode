@@ -110,6 +110,14 @@ type Agent struct {
 	// usage line out of the output writer.
 	lastUsage *provider.Usage
 
+	// sessCacheHit/sessCacheMiss accumulate cache tokens across every API call
+	// this session, so frontends can show the aggregate hit-rate (Σhit/Σ(hit+miss))
+	// — a steadier, cost-oriented number than the single-turn rate. They are NOT
+	// reset on compaction (compaction only rewrites session.Messages), so the
+	// aggregate never craters when the prefix is summarized away.
+	sessCacheHit  int
+	sessCacheMiss int
+
 	// planMode, when true, refuses any tool call whose ReadOnly() is false.
 	// The system prompt and tool list never change with the toggle so the
 	// prompt-cache prefix stays valid; the gating happens at execute time
@@ -173,6 +181,10 @@ func (a *Agent) SetSession(s *Session) { a.session = s }
 // gauge alongside the prompt; the actual cache decisions still live inside
 // maybeCompact.
 func (a *Agent) LastUsage() *provider.Usage { return a.lastUsage }
+
+// SessionCache returns the cumulative cache hit/miss prompt tokens across every
+// API call this session — the basis for the status line's aggregate hit-rate.
+func (a *Agent) SessionCache() (hit, miss int) { return a.sessCacheHit, a.sessCacheMiss }
 
 // ContextWindow returns the configured context-window size in tokens. 0
 // means compaction is disabled for this agent.
@@ -256,7 +268,8 @@ func (a *Agent) Run(ctx context.Context, input string) error {
 			return err
 		}
 		if usage != nil && usage.TotalTokens > 0 {
-			a.sink.Emit(event.Event{Kind: event.Usage, Usage: usage, Pricing: a.pricing})
+			a.sink.Emit(event.Event{Kind: event.Usage, Usage: usage, Pricing: a.pricing,
+				SessionHit: a.sessCacheHit, SessionMiss: a.sessCacheMiss})
 		}
 		if msg, ok := finishReasonMessage(usage); ok {
 			a.sink.Emit(event.Event{Kind: event.Notice, Level: event.LevelWarn, Text: msg})
@@ -338,6 +351,8 @@ func (a *Agent) stream(ctx context.Context) (string, string, []provider.ToolCall
 		case provider.ChunkUsage:
 			usage = chunk.Usage
 			a.lastUsage = chunk.Usage
+			a.sessCacheHit += chunk.Usage.CacheHitTokens
+			a.sessCacheMiss += chunk.Usage.CacheMissTokens
 		case provider.ChunkError:
 			return "", "", nil, nil, chunk.Err
 		}

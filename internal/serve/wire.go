@@ -50,13 +50,17 @@ type wireTool struct {
 }
 
 type wireUsage struct {
-	PromptTokens     int     `json:"promptTokens"`
-	CompletionTokens int     `json:"completionTokens"`
-	TotalTokens      int     `json:"totalTokens"`
-	CacheHitTokens   int     `json:"cacheHitTokens"`
-	CacheMissTokens  int     `json:"cacheMissTokens"`
-	ReasoningTokens  int     `json:"reasoningTokens,omitempty"`
-	CostUSD          float64 `json:"costUsd,omitempty"`
+	PromptTokens     int `json:"promptTokens"`
+	CompletionTokens int `json:"completionTokens"`
+	TotalTokens      int `json:"totalTokens"`
+	CacheHitTokens   int `json:"cacheHitTokens"`
+	CacheMissTokens  int `json:"cacheMissTokens"`
+	ReasoningTokens  int `json:"reasoningTokens,omitempty"`
+	// Session-cumulative cache tokens — the status line shows the aggregate
+	// hit-rate Σhit/Σ(hit+miss), steadier than the single-turn CacheHitTokens.
+	SessionCacheHitTokens  int     `json:"sessionCacheHitTokens"`
+	SessionCacheMissTokens int     `json:"sessionCacheMissTokens"`
+	CostUSD                float64 `json:"costUsd,omitempty"`
 }
 
 type wireApproval struct {
@@ -117,6 +121,7 @@ func toWire(e event.Event) wireEvent {
 				PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens,
 				TotalTokens: u.TotalTokens, CacheHitTokens: u.CacheHitTokens,
 				CacheMissTokens: u.CacheMissTokens, ReasoningTokens: u.ReasoningTokens,
+				SessionCacheHitTokens: e.SessionHit, SessionCacheMissTokens: e.SessionMiss,
 			}
 			if e.Pricing != nil {
 				w.Usage.CostUSD = e.Pricing.Cost(u)

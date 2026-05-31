@@ -601,6 +601,16 @@ func (c *Controller) LastUsage() *provider.Usage {
 	return c.executor.LastUsage()
 }
 
+// SessionCache returns cumulative cache hit/miss prompt tokens for the session,
+// so a frontend can render the aggregate (session-wide) cache-hit rate — steadier
+// than the single-turn rate and unaffected by compaction.
+func (c *Controller) SessionCache() (hit, miss int) {
+	if c.executor == nil {
+		return 0, 0
+	}
+	return c.executor.SessionCache()
+}
+
 // Balance queries the active provider's wallet balance, or (nil, nil) when the
 // provider declares no balance_url — so a caller treats "not configured" and
 // "fetched" the same and just omits the readout when nil.

@@ -228,6 +228,8 @@ function makeMockApp(): AppBindings {
           totalTokens: 1344,
           cacheHitTokens: 1024,
           cacheMissTokens: 256,
+          sessionCacheHitTokens: 1024,
+          sessionCacheMissTokens: 256,
         },
       });
       emit({ kind: "turn_done" });

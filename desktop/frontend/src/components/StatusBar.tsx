@@ -36,15 +36,25 @@ function JobsChip({ jobs }: { jobs: JobView[] }) {
   );
 }
 
-// cacheRate is the prompt cache-hit percentage from the last turn's usage, or
-// null when there's nothing to show. Mirrors the kernel's cached/new accounting:
-// prefer hit/(hit+miss), falling back to hit/prompt when only hits are reported.
-function cacheRate(u?: WireUsage): number | null {
+// nowRate is the SINGLE-TURN prompt cache-hit % (latest turn) — the higher,
+// steeper number on a non-compacting DeepSeek session. null when nothing yet.
+function nowRate(u?: WireUsage): number | null {
   if (!u) return null;
   let denom = u.cacheHitTokens + u.cacheMissTokens;
   if (denom === 0) denom = u.promptTokens;
   if (denom <= 0) return null;
   return Math.round((u.cacheHitTokens / denom) * 100);
+}
+
+// avgRate is the SESSION-AGGREGATE cache-hit % — Σhit/Σ(hit+miss) across every
+// turn — the steadier, cost-oriented number that matches the legacy dashboard.
+// On a non-compacting DeepSeek session it trails nowRate (early cold-start turns
+// drag the average down); it overtakes only when compaction craters single turns.
+function avgRate(u?: WireUsage): number | null {
+  if (!u) return null;
+  const denom = u.sessionCacheHitTokens + u.sessionCacheMissTokens;
+  if (denom <= 0) return null;
+  return Math.round((u.sessionCacheHitTokens / denom) * 100);
 }
 
 // shortCwd trims a path to its last two segments so the status line stays compact
@@ -105,7 +115,8 @@ export function StatusBar({
   const { t, locale } = useI18n();
   const now = useTick(running);
   const pct = context.window ? Math.min(100, Math.round((context.used / context.window) * 100)) : null;
-  const cachePct = cacheRate(usage);
+  const nowPct = nowRate(usage);
+  const avgPct = avgRate(usage);
 
   // While a turn runs, the status line shows live activity (word · elapsed ·
   // tokens) in place of the static context gauge.
@@ -135,10 +146,16 @@ export function StatusBar({
           </>
         )
       )}
-      {cachePct !== null && (
+      {nowPct !== null && (
         <>
           <span className="statusbar__sep">·</span>
-          <span className="statusbar__cache">{t("status.cache", { pct: cachePct })}</span>
+          <span className="statusbar__cache">{t("status.cache", { pct: nowPct })}</span>
+        </>
+      )}
+      {avgPct !== null && (
+        <>
+          <span className="statusbar__sep">·</span>
+          <span className="statusbar__cache">{t("status.cacheAvg", { pct: avgPct })}</span>
         </>
       )}
       {jobs && jobs.length > 0 && (

@@ -131,10 +131,16 @@ type Event struct {
 	Tool      Tool              // ToolDispatch / ToolResult
 	Usage     *provider.Usage   // Usage
 	Pricing   *provider.Pricing // Usage: for cost display (nil = omit cost)
-	Level     Level             // Notice
-	Approval  Approval          // ApprovalRequest
-	Ask       Ask               // AskRequest
-	Err       error             // TurnDone: non-nil on failure
+	// SessionHit/SessionMiss carry cumulative cache tokens across the whole
+	// session (Usage events only), so a frontend can show the aggregate hit-rate
+	// — which doesn't crater on a short turn or after compaction — alongside
+	// Usage's single-turn numbers.
+	SessionHit  int      // Usage: cumulative cache-hit prompt tokens this session
+	SessionMiss int      // Usage: cumulative cache-miss prompt tokens this session
+	Level       Level    // Notice
+	Approval    Approval // ApprovalRequest
+	Ask         Ask      // AskRequest
+	Err         error    // TurnDone: non-nil on failure
 }
 
 // Sink consumes a turn's events. The agent calls Emit serially from its run

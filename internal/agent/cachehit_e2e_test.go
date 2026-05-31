@@ -301,6 +301,43 @@ func TestReasoningRoundTripCost(t *testing.T) {
 	t.Logf("turns needed to reach 90%%: with round-trip = %d, stripped = %d", firstCross(withCoT), firstCross(without))
 }
 
+// TestSessionAggregateCacheRate verifies the session-aggregate hit-rate the
+// status line now shows: Agent.SessionCache() accumulates every turn's hit/miss
+// (so it equals the sum of the per-turn usages), and the aggregate rate is the
+// steadier, higher number compared to the volatile single-turn rate.
+func TestSessionAggregateCacheRate(t *testing.T) {
+	mock := &mockDeepSeek{t: t, reasoning: longReasoning}
+	srv := httptest.NewServer(http.HandlerFunc(mock.handler))
+	defer srv.Close()
+
+	a, sink := newAgent(t, srv.URL, mock.tools(), 0, 0)
+	const turns = 8
+	for i := 0; i < turns; i++ {
+		if err := a.Run(context.Background(), strings.Repeat("please consider this requirement. ", 6)); err != nil {
+			t.Fatalf("Run %d: %v", i, err)
+		}
+	}
+
+	// The agent's cumulative counters must equal the sum of the per-turn usages.
+	var sumHit, sumMiss int
+	for _, u := range sink.usages {
+		sumHit += u.CacheHitTokens
+		sumMiss += u.CacheMissTokens
+	}
+	hit, miss := a.SessionCache()
+	if hit != sumHit || miss != sumMiss {
+		t.Errorf("SessionCache()=%d/%d but per-turn sums are %d/%d", hit, miss, sumHit, sumMiss)
+	}
+
+	agg := 100 * hit / (hit + miss)
+	last := sink.usages[len(sink.usages)-1]
+	single := 100 * last.CacheHitTokens / last.PromptTokens
+	t.Logf("after %d turns: aggregate(session) = %d%%  vs  single(last turn) = %d%%", turns, agg, single)
+	if agg <= 0 || agg > 100 {
+		t.Errorf("aggregate rate out of range: %d%%", agg)
+	}
+}
+
 // newAgent wires a real openai.Provider at url into a real Agent.
 func newAgent(t *testing.T, url string, reg *tool.Registry, contextWindow, recentKeep int) (*Agent, *collectSink) {
 	t.Helper()

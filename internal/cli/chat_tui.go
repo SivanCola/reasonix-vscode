@@ -773,22 +773,35 @@ func (m chatTUI) contextTag() string {
 	}
 }
 
-// cacheTag renders the prompt cache-hit rate for the status line from the last
-// turn's usage — "cache 82%". "" before any turn or when no prompt tokens were
-// reported. Falls back to prompt-token-relative when only hits are reported.
+// cacheTag renders both prompt cache-hit rates for the status line —
+// "cache 88% · avg 78%": the single-turn rate (latest turn, the higher/steeper
+// number on a non-compacting DeepSeek session) and the session-aggregate rate
+// Σhit/Σ(hit+miss) (the steadier, cost-oriented number that matches the legacy
+// dashboard). "" before any cache tokens have been reported.
 func (m chatTUI) cacheTag() string {
-	u := m.ctrl.LastUsage()
-	if u == nil {
-		return ""
+	now := ""
+	if u := m.ctrl.LastUsage(); u != nil {
+		d := u.CacheHitTokens + u.CacheMissTokens
+		if d == 0 {
+			d = u.PromptTokens
+		}
+		if d > 0 {
+			now = fmt.Sprintf("cache %d%%", u.CacheHitTokens*100/d)
+		}
 	}
-	denom := u.CacheHitTokens + u.CacheMissTokens
-	if denom == 0 {
-		denom = u.PromptTokens
+	avg := ""
+	if hit, miss := m.ctrl.SessionCache(); hit+miss > 0 {
+		avg = fmt.Sprintf("avg %d%%", hit*100/(hit+miss))
 	}
-	if denom == 0 {
-		return ""
+	switch {
+	case now != "" && avg != "":
+		return dim(now + " · " + avg)
+	case now != "":
+		return dim(now)
+	case avg != "":
+		return dim(avg)
 	}
-	return dim(fmt.Sprintf("cache %d%%", u.CacheHitTokens*100/denom))
+	return ""
 }
 
 // jobsTag shows the count of running background jobs in the status line. Job

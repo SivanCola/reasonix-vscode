@@ -34,6 +34,10 @@ export interface WireUsage {
   cacheHitTokens: number;
   cacheMissTokens: number;
   reasoningTokens?: number;
+  // Session-cumulative cache tokens — the status bar shows the aggregate
+  // hit-rate (Σhit/Σ(hit+miss)), steadier than the single-turn cacheHitTokens.
+  sessionCacheHitTokens: number;
+  sessionCacheMissTokens: number;
   costUsd?: number;
 }
 

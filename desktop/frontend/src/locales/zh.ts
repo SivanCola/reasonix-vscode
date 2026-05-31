@@ -57,6 +57,7 @@ export const zh: Record<DictKey, string> = {
   "status.switchFolder": "{cwd}\n点击切换项目目录",
   "status.tokens": "tokens",
   "status.cache": "缓存 {pct}%",
+  "status.cacheAvg": "平均 {pct}%",
   "status.balanceTitle": "钱包余额",
   "status.jobs": "{n} 个运行中",
   "status.jobsTitle": "后台作业",
