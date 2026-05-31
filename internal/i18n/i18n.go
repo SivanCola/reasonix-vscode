@@ -82,6 +82,29 @@ type Messages struct {
 	CompHintSlash      string // key hint footer under the slash-command menu
 	CompHintFile       string // key hint footer under the @ file/resource menu
 
+	// slash command + sub-command descriptions shown in the menu (CLI and desktop
+	// share these via i18n.M, so both frontends localize identically).
+	CmdNew          string // /new
+	CmdCompact      string // /compact
+	CmdModel        string // /model
+	CmdMemory       string // /memory
+	CmdMcp          string // /mcp
+	CmdHooks        string // /hooks
+	CmdSkill        string // /skill
+	CmdHelp         string // /help
+	CmdTodo         string // /todo
+	ArgSkillList    string // /skill list
+	ArgSkillShow    string // /skill show
+	ArgSkillNew     string // /skill new
+	ArgSkillPaths   string // /skill paths
+	ArgMcpAdd       string // /mcp add
+	ArgMcpRemove    string // /mcp remove
+	ArgMcpList      string // /mcp list
+	ArgMcpConnected string // /mcp remove <server> tag
+	ArgHooksList    string // /hooks list
+	ArgHooksTrust   string // /hooks trust
+	ArgModelCurrent string // /model <ref> active tag
+
 	// init wizard
 	SelectProvidersLabel  string // multi-select label
 	EnterAPIKeysHeader    string // header before the per-env-var prompts

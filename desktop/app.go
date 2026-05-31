@@ -14,6 +14,7 @@ import (
 	"reasonix/internal/config"
 	"reasonix/internal/control"
 	"reasonix/internal/event"
+	"reasonix/internal/i18n"
 	"reasonix/internal/memory"
 	"reasonix/internal/provider"
 )
@@ -57,6 +58,10 @@ func (a *App) startup(ctx context.Context) {
 	// Resolve the active model to its canonical "provider/model" ref up front so
 	// the switcher can mark it current.
 	if cfg, err := config.Load(); err == nil {
+		// Drive the Go-side catalogue (i18n.M) from the configured language so the
+		// backend-provided slash UI — command descriptions, sub-command hints,
+		// listing notices — comes through localized, matching the frontend.
+		i18n.DetectLanguage(cfg.Language)
 		a.model = cfg.DefaultModel
 		if e, ok := cfg.ResolveModel(cfg.DefaultModel); ok {
 			a.model = e.Name + "/" + e.Model
@@ -416,13 +421,13 @@ type CommandInfo struct {
 // autocomplete menu.
 func (a *App) Commands() []CommandInfo {
 	out := []CommandInfo{
-		{Name: "new", Description: "Start a new session", Kind: "builtin"},
-		{Name: "compact", Description: "Summarize older history to free up context", Kind: "builtin"},
-		{Name: "model", Description: "Switch model", Kind: "builtin"},
-		{Name: "memory", Description: "Show project memory files", Kind: "builtin"},
-		{Name: "mcp", Description: "List MCP servers", Kind: "builtin"},
-		{Name: "hooks", Description: "List hooks", Kind: "builtin"},
-		{Name: "skill", Description: "List skills", Kind: "builtin"},
+		{Name: "new", Description: i18n.M.CmdNew, Kind: "builtin"},
+		{Name: "compact", Description: i18n.M.CmdCompact, Kind: "builtin"},
+		{Name: "model", Description: i18n.M.CmdModel, Kind: "builtin"},
+		{Name: "memory", Description: i18n.M.CmdMemory, Kind: "builtin"},
+		{Name: "mcp", Description: i18n.M.CmdMcp, Kind: "builtin"},
+		{Name: "hooks", Description: i18n.M.CmdHooks, Kind: "builtin"},
+		{Name: "skill", Description: i18n.M.CmdSkill, Kind: "builtin"},
 	}
 	if a.ctrl == nil {
 		return out

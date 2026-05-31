@@ -8,6 +8,7 @@ import (
 	"reasonix/internal/agent"
 	"reasonix/internal/boot"
 	"reasonix/internal/config"
+	"reasonix/internal/i18n"
 	"reasonix/internal/provider"
 )
 
@@ -306,6 +307,9 @@ func (a *App) SetLanguage(lang string) error {
 		return err
 	}
 	cfg.Language = strings.TrimSpace(lang)
+	// Keep the Go-side catalogue in sync so backend-provided slash UI re-localizes
+	// on the next fetch (matches the frontend's language switch).
+	i18n.DetectLanguage(cfg.Language)
 	return cfg.Save()
 }
 

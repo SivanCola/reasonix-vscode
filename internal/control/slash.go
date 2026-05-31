@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"reasonix/internal/config"
+	"reasonix/internal/i18n"
 	"reasonix/internal/skill"
 )
 
@@ -62,9 +63,9 @@ func SlashArgItems(line string, d ArgData) ([]SlashItem, int) {
 func mcpArgItems(prior []string, cur string, d ArgData) []SlashItem {
 	if len(prior) <= 1 {
 		return []SlashItem{
-			{Label: "add", Insert: "add ", Hint: "connect a server", Descend: true},
-			{Label: "remove", Insert: "remove ", Hint: "disconnect a server", Descend: true},
-			{Label: "list", Insert: "list", Hint: "show configured servers"},
+			{Label: "add", Insert: "add ", Hint: i18n.M.ArgMcpAdd, Descend: true},
+			{Label: "remove", Insert: "remove ", Hint: i18n.M.ArgMcpRemove, Descend: true},
+			{Label: "list", Insert: "list", Hint: i18n.M.ArgMcpList},
 		}
 	}
 	switch prior[1] {
@@ -74,7 +75,7 @@ func mcpArgItems(prior []string, cur string, d ArgData) []SlashItem {
 		}
 		var items []SlashItem
 		for _, name := range d.ServerNames {
-			items = append(items, SlashItem{Label: name, Insert: name, Hint: "connected"})
+			items = append(items, SlashItem{Label: name, Insert: name, Hint: i18n.M.ArgMcpConnected})
 		}
 		return items
 	case "add":
@@ -98,7 +99,7 @@ func modelArgItems(prior []string, d ArgData) []SlashItem {
 	for _, ref := range d.ModelRefs {
 		hint := ""
 		if ref == d.CurrentModel {
-			hint = "current"
+			hint = i18n.M.ArgModelCurrent
 		}
 		items = append(items, SlashItem{Label: ref, Insert: ref, Hint: hint})
 	}
@@ -108,10 +109,10 @@ func modelArgItems(prior []string, d ArgData) []SlashItem {
 func skillArgItems(prior []string, d ArgData) []SlashItem {
 	if len(prior) <= 1 {
 		return []SlashItem{
-			{Label: "list", Insert: "list", Hint: "list skills"},
-			{Label: "show", Insert: "show ", Hint: "show a skill's body", Descend: true},
-			{Label: "new", Insert: "new ", Hint: "scaffold a new skill"},
-			{Label: "paths", Insert: "paths", Hint: "show discovery paths"},
+			{Label: "list", Insert: "list", Hint: i18n.M.ArgSkillList},
+			{Label: "show", Insert: "show ", Hint: i18n.M.ArgSkillShow, Descend: true},
+			{Label: "new", Insert: "new ", Hint: i18n.M.ArgSkillNew},
+			{Label: "paths", Insert: "paths", Hint: i18n.M.ArgSkillPaths},
 		}
 	}
 	if (prior[1] == "show" || prior[1] == "cat") && len(prior) == 2 {
@@ -127,8 +128,8 @@ func skillArgItems(prior []string, d ArgData) []SlashItem {
 func hooksArgItems(prior []string) []SlashItem {
 	if len(prior) <= 1 {
 		return []SlashItem{
-			{Label: "list", Insert: "list", Hint: "list active hooks"},
-			{Label: "trust", Insert: "trust", Hint: "trust this project's hooks"},
+			{Label: "list", Insert: "list", Hint: i18n.M.ArgHooksList},
+			{Label: "trust", Insert: "trust", Hint: i18n.M.ArgHooksTrust},
 		}
 	}
 	return nil

@@ -56,14 +56,14 @@ const (
 // built-in verbs, custom commands, skills (each as "/<name>"), and MCP prompts.
 func (m *chatTUI) slashItems() []compItem {
 	items := []compItem{
-		{label: "/compact", insert: "/compact ", hint: "compact context"},
-		{label: "/new", insert: "/new ", hint: "fork a fresh session"},
-		{label: "/mcp", insert: "/mcp ", hint: "MCP servers", descend: true},
-		{label: "/model", insert: "/model ", hint: "switch model", descend: true},
-		{label: "/skill", insert: "/skill ", hint: "manage skills", descend: true},
-		{label: "/hooks", insert: "/hooks ", hint: "manage hooks", descend: true},
-		{label: "/help", insert: "/help ", hint: "list commands"},
-		{label: "/memory", insert: "/memory ", hint: "show memory files"},
+		{label: "/compact", insert: "/compact ", hint: i18n.M.CmdCompact},
+		{label: "/new", insert: "/new ", hint: i18n.M.CmdNew},
+		{label: "/mcp", insert: "/mcp ", hint: i18n.M.CmdMcp, descend: true},
+		{label: "/model", insert: "/model ", hint: i18n.M.CmdModel, descend: true},
+		{label: "/skill", insert: "/skill ", hint: i18n.M.CmdSkill, descend: true},
+		{label: "/hooks", insert: "/hooks ", hint: i18n.M.CmdHooks, descend: true},
+		{label: "/help", insert: "/help ", hint: i18n.M.CmdHelp},
+		{label: "/memory", insert: "/memory ", hint: i18n.M.CmdMemory},
 	}
 	for _, c := range m.commands {
 		items = append(items, compItem{label: "/" + c.Name, insert: "/" + c.Name + " ", hint: c.Description})
