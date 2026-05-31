@@ -241,6 +241,14 @@ func (m chatTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// Inline (non-alt-screen) mode doesn't repaint scrollback on a resize, so
+		// the previous frame's input-box border (drawn at the old width) wraps and
+		// strands a partial ─── line — one ghost per drag. Clear the screen on an
+		// actual size change so the new-width frame repaints clean. Skip the first
+		// sizing (nothing to ghost yet; it also commits the banner below).
+		if m.started && (m.width != msg.Width || m.height != msg.Height) {
+			cmds = append(cmds, func() tea.Msg { return tea.ClearScreen() })
+		}
 		m.width = msg.Width
 		m.height = msg.Height
 		m.input.SetWidth(msg.Width - 4)
