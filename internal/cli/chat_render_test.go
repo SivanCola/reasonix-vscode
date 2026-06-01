@@ -19,6 +19,7 @@ func newTestChatTUI() chatTUI {
 		input:            ti,
 		nextPasteID:      1,
 		reasoningLineIdx: -1,
+		answerIdx:        -1,
 		reasoning:        &strings.Builder{},
 		pending:          &strings.Builder{},
 		pendingCommit:    &commit,
@@ -95,5 +96,53 @@ func TestIngestEventFlushesAnswer(t *testing.T) {
 	}
 	if m.pending.Len() != 0 {
 		t.Errorf("answer buffer should be drained after the event line")
+	}
+}
+
+// TestStreamAnswerFlushesCompletedParagraphs proves a multi-paragraph answer
+// appears chunk by chunk: a closed paragraph renders to scrollback while the
+// still-streaming one stays buffered, and turn end flushes the remainder.
+func TestStreamAnswerFlushesCompletedParagraphs(t *testing.T) {
+	m := newTestChatTUI()
+
+	m.ingestEvent(event.Event{Kind: event.Text, Text: "First paragraph.\n\nSecond para "})
+	if m.answerIdx < 0 {
+		t.Fatalf("a completed paragraph should open a streamed answer block")
+	}
+	joined := strings.Join(m.transcript, "\n")
+	if !strings.Contains(joined, "First paragraph.") {
+		t.Errorf("completed paragraph should be on screen, transcript=%v", m.transcript)
+	}
+	if strings.Contains(joined, "Second para") {
+		t.Errorf("the still-streaming paragraph must stay buffered, transcript=%v", m.transcript)
+	}
+
+	m.ingestEvent(event.Event{Kind: event.Text, Text: "is done now."})
+	m.ingestEvent(event.Event{Kind: event.Message})
+	final := strings.Join(m.transcript, "\n")
+	if !strings.Contains(final, "First paragraph.") || !strings.Contains(final, "Second para is done now.") {
+		t.Errorf("turn end should flush the whole answer, transcript=%v", m.transcript)
+	}
+	if m.pending.Len() != 0 || m.answerIdx != -1 {
+		t.Errorf("answer state should reset after commit, pending=%d idx=%d", m.pending.Len(), m.answerIdx)
+	}
+}
+
+// TestFlushableMarkdownPrefixKeepsOpenFence proves a blank line inside an unclosed
+// fenced code block is not a flush boundary — the half-written block stays buffered
+// so it never renders mangled, while prose before the fence does flush.
+func TestFlushableMarkdownPrefixKeepsOpenFence(t *testing.T) {
+	open := "intro line\n\n```go\nfunc f() {\n\n\t// still typing"
+	if got := flushableMarkdownPrefix(open); got != "intro line" {
+		t.Errorf("open fence: flushable prefix = %q, want %q", got, "intro line")
+	}
+
+	closed := "```go\ncode\n\nmore\n```\n\ntrailing"
+	if got := flushableMarkdownPrefix(closed); got != "```go\ncode\n\nmore\n```" {
+		t.Errorf("closed fence: flushable prefix = %q", got)
+	}
+
+	if got := flushableMarkdownPrefix("no boundary yet"); got != "" {
+		t.Errorf("no blank line should flush nothing, got %q", got)
 	}
 }

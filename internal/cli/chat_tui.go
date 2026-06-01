@@ -105,9 +105,15 @@ type chatTUI struct {
 	// viewport re-feed after that in-place rewrite (length is unchanged).
 	reasoningLineIdx int
 	thinkStart       time.Time
-	transcriptDirty  bool
-	eventCh          chan event.Event
-	started          bool // banner + resumed history committed once
+	// answerIdx is the transcript index of the streaming answer block (rewritten in
+	// place as completed paragraphs arrive); -1 when none is open. answerFlushed is
+	// how many bytes of pending have already been rendered into it, so a Text packet
+	// that doesn't close a new paragraph re-renders nothing.
+	answerIdx       int
+	answerFlushed   int
+	transcriptDirty bool
+	eventCh         chan event.Event
+	started         bool // banner + resumed history committed once
 
 	// transcript holds every finalized line commitLine emits; the viewport
 	// renders a scrollable window of it (alt-screen owns the grid, so there's no
@@ -362,6 +368,7 @@ func newChatTUI(ctrl *control.Controller, missing string, eventCh chan event.Eve
 		spinner:          sp,
 		nextPasteID:      1,
 		reasoningLineIdx: -1,
+		answerIdx:        -1,
 		reasoning:        &strings.Builder{},
 		pending:          &strings.Builder{},
 		pendingCommit:    &commitBuf,
@@ -952,11 +959,40 @@ func (m *chatTUI) commitReasoning() {
 	m.reasoningLineIdx = -1
 }
 
-// commitPending renders the accumulated answer as markdown and freezes it into
-// scrollback. Joining commitReasoning then commitPending puts the answer on its
-// own line, restoring the thinking→answer break the renderer strips.
+// streamAnswer renders the answer streamed so far up to its last completed
+// paragraph (flushableMarkdownPrefix) and writes it as one transcript block,
+// rewritten in place as later paragraphs land — so a long reply appears chunk by
+// chunk instead of all at once on turn end. The trailing, still-streaming block
+// stays buffered (a half-written fence/list never renders early), and it only
+// re-renders when a new paragraph actually closes.
+func (m *chatTUI) streamAnswer() {
+	prefix := flushableMarkdownPrefix(m.pending.String())
+	if len(prefix) <= m.answerFlushed {
+		return
+	}
+	rendered := m.renderer.Render(prefix)
+	if rendered == "" {
+		return
+	}
+	m.answerFlushed = len(prefix)
+	block := strings.TrimRight(rendered, "\n")
+	if m.answerIdx < 0 {
+		m.answerIdx = len(m.transcript)
+		m.commitLine(block)
+	} else {
+		m.transcript[m.answerIdx] = block
+		m.transcriptDirty = true
+	}
+}
+
+// commitPending freezes the full accumulated answer as markdown — overwriting the
+// streamed block if one is open (streamAnswer), else committing fresh. Joining
+// commitReasoning then commitPending puts the answer on its own line, restoring
+// the thinking→answer break the renderer strips.
 func (m *chatTUI) commitPending() {
 	if m.pending.Len() == 0 {
+		m.answerIdx = -1
+		m.answerFlushed = 0
 		return
 	}
 	raw := m.pending.String()
@@ -964,8 +1000,40 @@ func (m *chatTUI) commitPending() {
 	if rendered == "" {
 		rendered = raw
 	}
-	m.commitLine(strings.TrimRight(rendered, "\n"))
+	block := strings.TrimRight(rendered, "\n")
+	if m.answerIdx < 0 {
+		m.commitLine(block)
+	} else {
+		m.transcript[m.answerIdx] = block
+		m.transcriptDirty = true
+	}
 	m.pending.Reset()
+	m.answerIdx = -1
+	m.answerFlushed = 0
+}
+
+// flushableMarkdownPrefix returns the longest prefix of buf made of complete
+// markdown blocks — text up to the last blank line outside any open fenced code
+// block. A blank line inside a ``` / ~~~ fence isn't a boundary, so a half-written
+// code block stays buffered until it closes.
+func flushableMarkdownPrefix(buf string) string {
+	lines := strings.Split(buf, "\n")
+	inFence := false
+	boundary := -1
+	for i, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence && t == "" {
+			boundary = i
+		}
+	}
+	if boundary <= 0 {
+		return ""
+	}
+	return strings.Join(lines[:boundary], "\n")
 }
 
 // planApprovalTool is the Tool name the controller puts on the ApprovalRequest it
@@ -1824,6 +1892,7 @@ func (m *chatTUI) ingestEvent(e event.Event) {
 	case event.Text:
 		m.commitReasoning() // reasoning ends as the answer begins
 		m.pending.WriteString(e.Text)
+		m.streamAnswer()
 
 	case event.Message:
 		// The answer stream is complete — freeze reasoning + the markdown answer.
