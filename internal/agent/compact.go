@@ -291,9 +291,9 @@ func tailStart(msgs []provider.Message, head, budgetTokens int, tokPerChar float
 // actually sent (the provider strips it). Falls back to ~4 chars/token before
 // any usage is known, and ignores absurd ratios.
 func (a *Agent) tokPerChar() float64 {
-	if a.lastUsage != nil && a.lastUsage.PromptTokens > 0 {
+	if u := a.lastUsage.Load(); u != nil && u.PromptTokens > 0 {
 		if c := charsOfMessages(a.session.Messages); c > 0 {
-			if r := float64(a.lastUsage.PromptTokens) / float64(c); r > 0.05 && r < 2 {
+			if r := float64(u.PromptTokens) / float64(c); r > 0.05 && r < 2 {
 				return r
 			}
 		}

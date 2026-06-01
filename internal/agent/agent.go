@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"reasonix/internal/diff"
@@ -119,18 +120,19 @@ type Agent struct {
 	// it to event.Discard.
 	sink event.Sink
 
-	// lastUsage caches the most recent per-turn telemetry the provider
-	// reported so the CLI can expose a context gauge without re-scraping the
-	// usage line out of the output writer.
-	lastUsage *provider.Usage
+	// lastUsage caches the most recent per-turn telemetry the provider reported so
+	// the CLI can expose a context gauge without re-scraping the usage line. The
+	// run loop writes it while a frontend's status line reads it, so it is atomic.
+	lastUsage atomic.Pointer[provider.Usage]
 
 	// sessCacheHit/sessCacheMiss accumulate cache tokens across every API call
 	// this session, so frontends can show the aggregate hit-rate (Σhit/Σ(hit+miss))
 	// — a steadier, cost-oriented number than the single-turn rate. They are NOT
 	// reset on compaction (compaction only rewrites session.Messages), so the
-	// aggregate never craters when the prefix is summarized away.
-	sessCacheHit  int
-	sessCacheMiss int
+	// aggregate never craters when the prefix is summarized away. Atomic: the run
+	// loop accumulates them while the status line reads them.
+	sessCacheHit  atomic.Int64
+	sessCacheMiss atomic.Int64
 
 	// planMode, when true, refuses any tool call whose ReadOnly() is false.
 	// The system prompt and tool list never change with the toggle so the
@@ -226,11 +228,13 @@ func (a *Agent) SetSession(s *Session) { a.session = s }
 // reported (nil if no turn has run yet). The TUI uses it to show a context
 // gauge alongside the prompt; the actual cache decisions still live inside
 // maybeCompact.
-func (a *Agent) LastUsage() *provider.Usage { return a.lastUsage }
+func (a *Agent) LastUsage() *provider.Usage { return a.lastUsage.Load() }
 
 // SessionCache returns the cumulative cache hit/miss prompt tokens across every
 // API call this session — the basis for the status line's aggregate hit-rate.
-func (a *Agent) SessionCache() (hit, miss int) { return a.sessCacheHit, a.sessCacheMiss }
+func (a *Agent) SessionCache() (hit, miss int) {
+	return int(a.sessCacheHit.Load()), int(a.sessCacheMiss.Load())
+}
 
 // ContextWindow returns the configured context-window size in tokens. 0
 // means compaction is disabled for this agent.
@@ -326,7 +330,7 @@ func (a *Agent) Run(ctx context.Context, input string) error {
 		}
 		if usage != nil && usage.TotalTokens > 0 {
 			a.sink.Emit(event.Event{Kind: event.Usage, Usage: usage, Pricing: a.pricing,
-				SessionHit: a.sessCacheHit, SessionMiss: a.sessCacheMiss})
+				SessionHit: int(a.sessCacheHit.Load()), SessionMiss: int(a.sessCacheMiss.Load())})
 		}
 		if msg, ok := finishReasonMessage(usage); ok {
 			a.sink.Emit(event.Event{Kind: event.Notice, Level: event.LevelWarn, Text: msg})
@@ -420,9 +424,9 @@ func (a *Agent) stream(ctx context.Context, turn int) (string, string, string, [
 			calls = append(calls, *chunk.ToolCall)
 		case provider.ChunkUsage:
 			usage = chunk.Usage
-			a.lastUsage = chunk.Usage
-			a.sessCacheHit += chunk.Usage.CacheHitTokens
-			a.sessCacheMiss += chunk.Usage.CacheMissTokens
+			a.lastUsage.Store(chunk.Usage)
+			a.sessCacheHit.Add(int64(chunk.Usage.CacheHitTokens))
+			a.sessCacheMiss.Add(int64(chunk.Usage.CacheMissTokens))
 		case provider.ChunkError:
 			return "", "", "", nil, nil, chunk.Err
 		}
