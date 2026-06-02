@@ -447,3 +447,23 @@ func TestDoubleCtrlCQuit(t *testing.T) {
 		t.Error("expired Ctrl+C should refresh lastCtrlCAt")
 	}
 }
+
+// TestAgentEventCoalescesBurst proves one update drains the buffered event burst
+// behind the delivered event, so a flood collapses into a single re-render.
+func TestAgentEventCoalescesBurst(t *testing.T) {
+	m := newTestChatTUI()
+	m.eventCh = make(chan event.Event, 16)
+	m.eventCh <- event.Event{Kind: event.ToolProgress, Tool: event.Tool{ID: "b1", Output: "l1\n"}}
+	m.eventCh <- event.Event{Kind: event.ToolProgress, Tool: event.Tool{ID: "b1", Output: "l2\n"}}
+	m.eventCh <- event.Event{Kind: event.ToolProgress, Tool: event.Tool{ID: "b1", Output: "l3\n"}}
+
+	next, _ := m.update(agentEventMsg(event.Event{Kind: event.ToolDispatch, Tool: event.Tool{ID: "b1", Name: "bash", Args: `{"command":"x"}`}}))
+	cm := next.(chatTUI)
+
+	if cm.toolLineCount != 3 {
+		t.Fatalf("burst not coalesced into one update: toolLineCount=%d, want 3", cm.toolLineCount)
+	}
+	if len(m.eventCh) != 0 {
+		t.Errorf("channel should be fully drained, %d left", len(m.eventCh))
+	}
+}

@@ -234,6 +234,10 @@ const (
 // agentEventMsg is one typed event from the agent's run loop.
 type agentEventMsg event.Event
 
+// maxEventDrain caps how many buffered events one Update coalesces before
+// yielding to render, so a sustained output flood still shows live progress.
+const maxEventDrain = 512
+
 // compactDoneMsg reports that an async /compact pass returned. The card was
 // already drawn from the CompactionDone event; this only surfaces a failure and
 // snapshots on success.
@@ -769,11 +773,31 @@ func (m chatTUI) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case agentEventMsg:
-		m.ingestEvent(event.Event(msg))
+		e := event.Event(msg)
+		m.ingestEvent(e)
+		turnDone := e.Kind == event.TurnDone
+		// Coalesce a burst: the goroutine that produced this event has already
+		// exited (a Cmd reads the channel once), so it's safe to drain the events
+		// already buffered and ingest them now. One re-wrap then covers the whole
+		// batch instead of one per event — bounds the O(transcript) re-render cost
+		// when bash output or reasoning floods in. Capped so a sustained flood
+		// still yields to render periodically.
+	drain:
+		for drained := 0; drained < maxEventDrain; drained++ {
+			select {
+			case e2 := <-m.eventCh:
+				m.ingestEvent(e2)
+				if e2.Kind == event.TurnDone {
+					turnDone = true
+				}
+			default:
+				break drain
+			}
+		}
 		cmds = append(cmds, waitForAgentEvent(m.eventCh))
 		// A turn just spent tokens (and money) — refresh the balance readout and
 		// the custom status line (its context/cost inputs just changed).
-		if event.Event(msg).Kind == event.TurnDone {
+		if turnDone {
 			cmds = append(cmds, fetchBalance(m.ctrl))
 			if c := m.runStatusline(); c != nil {
 				cmds = append(cmds, c)
