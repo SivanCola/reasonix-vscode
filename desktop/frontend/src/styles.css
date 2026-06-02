@@ -476,17 +476,40 @@ body {
 .sidebar-session {
   display: flex;
   align-items: center;
-  gap: var(--list-row-gap);
+  gap: 4px;
   height: var(--list-row-height);
-  padding: 0 var(--list-row-px);
+  padding: 0 4px 0 var(--list-row-px);
   margin-bottom: 2px;
   border-radius: var(--list-row-radius);
+  cursor: default;
 }
 .sidebar-session:hover {
   background: var(--list-row-hover-bg);
 }
 .sidebar-session svg {
   display: none;
+}
+.sidebar-session__main {
+  --wails-draggable: no-drag;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--list-row-gap);
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar-session__main:disabled {
+  cursor: default;
+}
+.sidebar-session__main:disabled:hover {
+  color: inherit;
 }
 .sidebar-session__body {
   display: flex;
@@ -511,6 +534,65 @@ body {
   color: var(--list-row-meta);
   font-size: 11px;
   line-height: 1;
+}
+.sidebar-session__actions {
+  --wails-draggable: no-drag;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.sidebar-session:hover .sidebar-session__actions,
+.sidebar-session:focus-within .sidebar-session__actions {
+  opacity: 1;
+}
+.sidebar-session__act {
+  --wails-draggable: no-drag;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+}
+.sidebar-session__act svg {
+  display: block;
+}
+.sidebar-session__act:hover {
+  color: var(--fg);
+  background: var(--bg);
+}
+.sidebar-session__act:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+.sidebar-session__act:disabled:hover {
+  color: var(--fg-faint);
+  background: transparent;
+}
+.sidebar-session__act--danger,
+.sidebar-session__act--danger:hover {
+  color: #e5534b;
+}
+.sidebar-session__rename {
+  --wails-draggable: no-drag;
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--accent-soft);
+  border-radius: 7px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
 }
 .sidebar-session--current {
   background: var(--list-row-current-bg);

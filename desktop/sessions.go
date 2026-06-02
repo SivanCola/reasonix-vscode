@@ -67,6 +67,10 @@ func saveSessionTitles(dir string, m map[string]string) error {
 
 // setSessionTitle sets (or, with an empty title, clears) a session's custom name.
 func setSessionTitle(dir, sessionPath, title string) error {
+	sessionPath, _, err := validateSessionPath(dir, sessionPath)
+	if err != nil {
+		return err
+	}
 	m := loadSessionTitles(dir)
 	key := filepath.Base(sessionPath)
 	if strings.TrimSpace(title) == "" {
@@ -77,25 +81,80 @@ func setSessionTitle(dir, sessionPath, title string) error {
 	return saveSessionTitles(dir, m)
 }
 
-// deleteSessionFile removes a session's .jsonl and its title entry.
+// deleteSessionFile removes a session's .jsonl and its sidecar state.
 func deleteSessionFile(dir, sessionPath string) error {
+	sessionPath, key, err := validateSessionPath(dir, sessionPath)
+	if err != nil {
+		return err
+	}
 	if err := os.Remove(sessionPath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	if err := os.Remove(sessionPath + ".meta"); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.RemoveAll(strings.TrimSuffix(sessionPath, ".jsonl") + ".ckpt"); err != nil {
+		return err
+	}
 	m := loadSessionTitles(dir)
-	if _, ok := m[filepath.Base(sessionPath)]; ok {
-		delete(m, filepath.Base(sessionPath))
+	if _, ok := m[key]; ok {
+		delete(m, key)
 		if err := saveSessionTitles(dir, m); err != nil {
 			return err
 		}
 	}
-	if dm := loadSessionDisplays(dir); dm[filepath.Base(sessionPath)] != nil {
-		delete(dm, filepath.Base(sessionPath))
+	if dm := loadSessionDisplays(dir); dm[key] != nil {
+		delete(dm, key)
 		if err := saveSessionDisplays(dir, dm); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func validateSessionPath(dir, sessionPath string) (string, string, error) {
+	if strings.TrimSpace(sessionPath) == "" {
+		return "", "", fmt.Errorf("empty session path")
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", "", err
+	}
+	path := sessionPath
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(absDir, path)
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", "", err
+	}
+	if filepath.Ext(absPath) != ".jsonl" {
+		return "", "", fmt.Errorf("not a session file: %s", sessionPath)
+	}
+	rel, err := filepath.Rel(absDir, absPath)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || filepath.IsAbs(rel) {
+		return "", "", fmt.Errorf("session path outside session dir: %s", sessionPath)
+	}
+	if info, err := os.Lstat(absPath); err == nil {
+		if info.IsDir() {
+			return "", "", fmt.Errorf("not a session file: %s", sessionPath)
+		}
+		realDir, dirErr := filepath.EvalSymlinks(absDir)
+		if dirErr != nil {
+			realDir = absDir
+		}
+		realPath, err := filepath.EvalSymlinks(absPath)
+		if err != nil {
+			return "", "", err
+		}
+		rel, err := filepath.Rel(realDir, realPath)
+		if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || filepath.IsAbs(rel) {
+			return "", "", fmt.Errorf("session path escapes session dir: %s", sessionPath)
+		}
+	} else if !os.IsNotExist(err) {
+		return "", "", err
+	}
+	return absPath, filepath.Base(absPath), nil
 }
 
 type sessionDisplayMap map[string]map[string]string

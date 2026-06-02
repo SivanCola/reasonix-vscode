@@ -406,13 +406,21 @@ func (a *App) ListSessions() []SessionMeta {
 // session — that's the conversation on screen, and auto-save would recreate the
 // file on the next turn; start a new session first to retire it.
 func (a *App) DeleteSession(path string) error {
+	dir := config.SessionDir()
+	sessionPath, _, err := validateSessionPath(dir, path)
+	if err != nil {
+		return err
+	}
 	a.mu.RLock()
 	ctrl := a.ctrl
 	a.mu.RUnlock()
-	if ctrl != nil && ctrl.SessionPath() == path {
-		return errActiveSession
+	if ctrl != nil {
+		currentPath, _, err := validateSessionPath(dir, ctrl.SessionPath())
+		if err == nil && currentPath == sessionPath {
+			return errActiveSession
+		}
 	}
-	return deleteSessionFile(config.SessionDir(), path)
+	return deleteSessionFile(dir, sessionPath)
 }
 
 // RenameSession sets a custom display name for a session (empty clears it back to

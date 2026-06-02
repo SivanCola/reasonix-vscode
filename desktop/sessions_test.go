@@ -114,6 +114,13 @@ func TestDeleteSessionFile(t *testing.T) {
 	dir := t.TempDir()
 	sessionPath := filepath.Join(dir, "session.jsonl")
 	os.WriteFile(sessionPath, []byte("data"), 0o644)
+	metaPath := sessionPath + ".meta"
+	os.WriteFile(metaPath, []byte("{}"), 0o644)
+	ckptDir := filepath.Join(dir, "session.ckpt")
+	if err := os.MkdirAll(ckptDir, 0o755); err != nil {
+		t.Fatalf("mkdir ckpt: %v", err)
+	}
+	os.WriteFile(filepath.Join(ckptDir, "1.json"), []byte("{}"), 0o644)
 
 	// Set a title first.
 	setSessionTitle(dir, sessionPath, "My Title")
@@ -127,6 +134,12 @@ func TestDeleteSessionFile(t *testing.T) {
 	// File should be gone.
 	if _, err := os.Stat(sessionPath); !os.IsNotExist(err) {
 		t.Error("session file should be deleted")
+	}
+	if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
+		t.Error("session meta should be deleted")
+	}
+	if _, err := os.Stat(ckptDir); !os.IsNotExist(err) {
+		t.Error("session checkpoints should be deleted")
 	}
 	// Title should be gone.
 	m := loadSessionTitles(dir)
@@ -156,6 +169,49 @@ func TestDeleteSessionFileMissing(t *testing.T) {
 	// Deleting a non-existent file should not error.
 	if err := deleteSessionFile(dir, filepath.Join(dir, "missing.jsonl")); err != nil {
 		t.Fatalf("delete missing: %v", err)
+	}
+}
+
+func TestDeleteSessionFileRejectsOutsideDir(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	os.WriteFile(outside, []byte("data"), 0o644)
+
+	if err := deleteSessionFile(dir, outside); err == nil {
+		t.Fatal("delete outside dir should fail")
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("outside file should remain: %v", err)
+	}
+}
+
+func TestDeleteSessionFileRejectsNonJSONL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.meta")
+	os.WriteFile(path, []byte("data"), 0o644)
+
+	if err := deleteSessionFile(dir, path); err == nil {
+		t.Fatal("delete non-jsonl should fail")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("non-jsonl file should remain: %v", err)
+	}
+}
+
+func TestDeleteSessionFileRejectsSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.jsonl")
+	os.WriteFile(outside, []byte("data"), 0o644)
+	link := filepath.Join(dir, "link.jsonl")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if err := deleteSessionFile(dir, link); err == nil {
+		t.Fatal("delete symlink escape should fail")
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("outside target should remain: %v", err)
 	}
 }
 

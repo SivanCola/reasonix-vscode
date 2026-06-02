@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,31 @@ func TestSetEffortRejectsRunningTurn(t *testing.T) {
 
 	close(runner.release)
 	waitNotRunning(t, app.ctrl)
+}
+
+func TestDeleteSessionRejectsActiveRelativePath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	dir := config.SessionDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	path := filepath.Join(dir, "active.jsonl")
+	if err := os.WriteFile(path, []byte(`{"role":"user","content":"hello"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	app := NewApp()
+	app.ctrl = control.New(control.Options{SessionDir: dir, SessionPath: path, Label: "test"})
+	defer app.ctrl.Close()
+
+	if err := app.DeleteSession(filepath.Base(path)); err != errActiveSession {
+		t.Fatalf("DeleteSession(active basename) error = %v, want errActiveSession", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("active session should remain: %v", err)
+	}
 }
 
 type blockingRunner struct {

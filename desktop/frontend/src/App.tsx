@@ -7,10 +7,14 @@ import {
   History,
   Settings as SettingsIcon,
   MessageSquare,
+  Pencil,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Check,
+  Trash2,
+  X,
 } from "lucide-react";
 import logo from "./assets/logo.svg";
 import { useT } from "./lib/i18n";
@@ -159,6 +163,9 @@ export default function App() {
   const [memView, setMemView] = useState<MemoryView | null>(null);
   const [histView, setHistView] = useState<SessionMeta[] | null>(null);
   const [sidebarSessions, setSidebarSessions] = useState<SessionMeta[]>([]);
+  const [sidebarEditing, setSidebarEditing] = useState<string | null>(null);
+  const [sidebarDraft, setSidebarDraft] = useState("");
+  const [sidebarConfirming, setSidebarConfirming] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed);
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [sidebarResizing, setSidebarResizing] = useState(false);
@@ -520,7 +527,8 @@ export default function App() {
     async (path: string) => {
       if (state.running) return;
       await deleteSession(path);
-      setHistView(await refreshSessions());
+      const sessions = await refreshSessions();
+      setHistView((cur) => (cur === null ? null : sessions));
     },
     [state.running, deleteSession, refreshSessions],
   );
@@ -528,9 +536,36 @@ export default function App() {
     async (path: string, title: string) => {
       if (state.running) return;
       await renameSession(path, title);
-      setHistView(await refreshSessions());
+      const sessions = await refreshSessions();
+      setHistView((cur) => (cur === null ? null : sessions));
     },
     [state.running, renameSession, refreshSessions],
+  );
+
+  const startSidebarRename = useCallback((session: SessionMeta) => {
+    if (state.running) return;
+    setSidebarConfirming(null);
+    setSidebarEditing(session.path);
+    setSidebarDraft(session.title || session.preview || "");
+  }, [state.running]);
+
+  const commitSidebarRename = useCallback(
+    async (path: string) => {
+      if (state.running) return;
+      const title = sidebarDraft.trim();
+      setSidebarEditing(null);
+      await onRenameSession(path, title);
+    },
+    [onRenameSession, sidebarDraft, state.running],
+  );
+
+  const confirmSidebarDelete = useCallback(
+    async (path: string) => {
+      if (state.running) return;
+      setSidebarConfirming(null);
+      await onDeleteSession(path);
+    },
+    [onDeleteSession, state.running],
   );
 
   // Workspace: open the folder chooser and switch projects. The hook resets the
@@ -625,21 +660,85 @@ export default function App() {
                 <div className="sidebar__empty">{t("sidebar.noRecent")}</div>
               ) : (
                 sidebarSessions.map((session) => (
-                  <button
+                  <div
                     className={`sidebar-session${session.current ? " sidebar-session--current" : ""}`}
                     key={session.path}
-                    onClick={() => void onResumeSession(session.path)}
-                    disabled={state.running || session.current}
                     title={session.path}
                   >
-                    <MessageSquare size={14} />
-                    <span className="sidebar-session__body">
-                      <span className="sidebar-session__title">{sessionTitle(session, t("history.emptySession"))}</span>
-                      <span className="sidebar-session__meta">
-                        {session.current ? t("history.current") : sessionTime(sessionActivityTime(session))}
+                    {sidebarEditing === session.path ? (
+                      <input
+                        className="sidebar-session__rename"
+                        autoFocus
+                        value={sidebarDraft}
+                        onChange={(e) => setSidebarDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void commitSidebarRename(session.path);
+                          if (e.key === "Escape") setSidebarEditing(null);
+                        }}
+                        onBlur={() => void commitSidebarRename(session.path)}
+                        placeholder={t("history.namePlaceholder")}
+                      />
+                    ) : (
+                      <button
+                        className="sidebar-session__main"
+                        onClick={() => void onResumeSession(session.path)}
+                        disabled={state.running || session.current}
+                        title={session.path}
+                      >
+                        <MessageSquare size={14} />
+                        <span className="sidebar-session__body">
+                          <span className="sidebar-session__title">{sessionTitle(session, t("history.emptySession"))}</span>
+                          <span className="sidebar-session__meta">
+                            {session.current ? t("history.current") : sessionTime(sessionActivityTime(session))}
+                          </span>
+                        </span>
+                      </button>
+                    )}
+                    {sidebarEditing !== session.path && (
+                      <span className="sidebar-session__actions">
+                        {sidebarConfirming === session.path ? (
+                          <>
+                            <button
+                              className="sidebar-session__act sidebar-session__act--danger"
+                              title={t("history.confirmDelete")}
+                              disabled={state.running}
+                              onClick={() => void confirmSidebarDelete(session.path)}
+                            >
+                              <Check size={13} />
+                            </button>
+                            <button
+                              className="sidebar-session__act"
+                              title={t("common.cancel")}
+                              onClick={() => setSidebarConfirming(null)}
+                            >
+                              <X size={13} />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              className="sidebar-session__act"
+                              title={t("history.rename")}
+                              disabled={state.running}
+                              onClick={() => startSidebarRename(session)}
+                            >
+                              <Pencil size={12} />
+                            </button>
+                            {!session.current && (
+                              <button
+                                className="sidebar-session__act"
+                                title={t("common.delete")}
+                                disabled={state.running}
+                                onClick={() => setSidebarConfirming(session.path)}
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            )}
+                          </>
+                        )}
                       </span>
-                    </span>
-                  </button>
+                    )}
+                  </div>
                 ))
               )}
             </div>
