@@ -605,6 +605,7 @@ default_model = "test-model"
 [codegraph]
 enabled = true
 path = %q
+tier = "background"
 
 [agent]
 system_prompt = "BASE"

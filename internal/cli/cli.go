@@ -534,7 +534,11 @@ func setupConfig(args []string) int {
 }
 
 func writeDefaultConfig(path string) int {
-	if err := config.Default().SaveTo(path); err != nil {
+	c := config.Default()
+	// A freshly scaffolded config starts without the codegraph daemon; existing
+	// configs (which never wrote [codegraph]) keep it on via the built-in default.
+	c.Codegraph.Enabled = false
+	if err := c.SaveTo(path); err != nil {
 		fmt.Fprintln(os.Stderr, i18n.M.WriteConfigErr, err)
 		return 1
 	}
@@ -563,8 +567,15 @@ func interactiveSetup(configPath, envPath string) int {
 	// Seed from the existing config when reconfiguring, so a re-run to fix a key
 	// preserves the user's providers / agent settings instead of resetting to
 	// defaults. First run (no file) falls back to the built-in defaults.
+	_, statErr := os.Stat(configPath)
+	isNewConfig := statErr != nil
 	cfg := config.LoadForEdit(configPath)
 	prevDefault := cfg.DefaultModel
+	if isNewConfig {
+		// Brand-new user: start without the codegraph daemon. A reconfigure of an
+		// existing config keeps whatever the user already had.
+		cfg.Codegraph.Enabled = false
+	}
 
 	lang, err := selectLanguage()
 	if err != nil {

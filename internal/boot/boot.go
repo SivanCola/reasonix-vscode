@@ -219,10 +219,11 @@ func Build(ctx context.Context, opts Options) (*control.Controller, error) {
 	// tools come online next session — otherwise point the user at the explicit
 	// install command. A failed init or fetch is a notice, not fatal.
 	//
-	// Warm CodeGraph projects stay eager because the agent benefits from seeing
-	// symbol-graph tools on the first turn. Cold projects start in the background:
-	// the first .codegraph/ creation and daemon warmup should not be reported as
-	// a startup failure just because they exceeded the generic MCP budget.
+	// CodeGraph follows the same user-selectable tier model as ordinary MCP
+	// servers when a tier is set. EnsureInit only creates .codegraph/ (fast,
+	// size-independent). With no explicit tier — an upgraded config that predates
+	// the setting — it keeps the historical startup: warm projects eager so
+	// symbol tools are ready on the first turn, cold projects in the background.
 	if cfg.Codegraph.Enabled {
 		bin, ok := codegraph.Resolve(cfg.Codegraph.Path)
 		switch {
@@ -234,12 +235,29 @@ func Build(ctx context.Context, opts Options) (*control.Controller, error) {
 					Text: "codegraph: init failed (" + err.Error() + ") — symbol-graph tools disabled this session"})
 				break
 			}
-			if warm {
+			bgNotice := func() {
+				if !warm {
+					sink.Emit(event.Event{Kind: event.Notice, Level: event.LevelInfo,
+						Text: "codegraph: preparing code-intelligence tools in the background — tools will appear when ready"})
+				}
+			}
+			if strings.TrimSpace(cfg.Codegraph.Tier) == "" {
+				if warm {
+					eagerSpecs = append(eagerSpecs, spec)
+				} else {
+					bgSpecs = append(bgSpecs, spec)
+					bgNotice()
+				}
+				break
+			}
+			switch cfg.Codegraph.ResolvedTier() {
+			case "eager":
 				eagerSpecs = append(eagerSpecs, spec)
-			} else {
+			case "background":
 				bgSpecs = append(bgSpecs, spec)
-				sink.Emit(event.Event{Kind: event.Notice, Level: event.LevelInfo,
-					Text: "codegraph: preparing code-intelligence tools in the background — tools will appear when ready"})
+				bgNotice()
+			default:
+				lazySpecs = append(lazySpecs, spec)
 			}
 		case cfg.Codegraph.AutoInstall:
 			notify := func(msg string) { sink.Emit(event.Event{Kind: event.Notice, Level: event.LevelInfo, Text: msg}) }

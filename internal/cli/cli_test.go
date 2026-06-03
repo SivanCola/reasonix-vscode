@@ -472,3 +472,13 @@ func groupByFamilyKeys(ps []config.ProviderEntry, key string) []int {
 	_, members, _ := groupByFamily(ps)
 	return members[key]
 }
+
+func TestWriteDefaultConfigDisablesCodegraph(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reasonix.toml")
+	if rc := writeDefaultConfig(path); rc != 0 {
+		t.Fatalf("writeDefaultConfig rc = %d", rc)
+	}
+	if c := config.LoadForEdit(path); c.Codegraph.Enabled {
+		t.Fatal("a freshly scaffolded config left codegraph enabled; new users should start without it")
+	}
+}

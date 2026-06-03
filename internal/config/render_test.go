@@ -35,6 +35,7 @@ func TestRenderTOMLRoundTrips(t *testing.T) {
 	}
 	orig.Skills.Paths = []string{"~/my-skills", "../shared/skills"}
 	orig.Skills.DisabledSkills = []string{"review", "explore"}
+	orig.Codegraph = CodegraphConfig{Enabled: true, AutoInstall: false, Path: "/opt/codegraph", Tier: "background"}
 	orig.Plugins = []PluginEntry{
 		{Name: "example", Command: "reasonix-plugin-example"},
 		{Name: "stripe", Type: "http", URL: "https://mcp.stripe.com", Headers: map[string]string{"Authorization": "Bearer x"}, AutoStart: boolPtr(false), Tier: "background"},
@@ -77,6 +78,18 @@ func TestRenderTOMLRoundTrips(t *testing.T) {
 	}
 	if got.Agent.SystemPrompt != orig.Agent.SystemPrompt {
 		t.Errorf("system_prompt mismatch:\n got %q\nwant %q", got.Agent.SystemPrompt, orig.Agent.SystemPrompt)
+	}
+	if !got.Codegraph.Enabled {
+		t.Error("codegraph.enabled = false, want true")
+	}
+	if got.Codegraph.AutoInstall {
+		t.Error("codegraph.auto_install = true, want false")
+	}
+	if got.Codegraph.Path != "/opt/codegraph" {
+		t.Errorf("codegraph.path = %q, want /opt/codegraph", got.Codegraph.Path)
+	}
+	if got.Codegraph.Tier != "background" {
+		t.Errorf("codegraph.tier = %q, want background", got.Codegraph.Tier)
 	}
 	if got.Agent.SubagentModel != "mimo-pro" {
 		t.Errorf("subagent_model = %q, want mimo-pro", got.Agent.SubagentModel)

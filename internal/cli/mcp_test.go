@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"reasonix/internal/config"
+	"reasonix/internal/control"
 	"reasonix/internal/plugin"
 )
 
@@ -403,6 +404,114 @@ func TestApplyMCPModePersistsTier(t *testing.T) {
 	}
 	if len(loaded.Plugins) != 1 || loaded.Plugins[0].Tier != "background" {
 		t.Fatalf("tier not persisted, plugins=%+v", loaded.Plugins)
+	}
+}
+
+func TestApplyMCPModeRecordsPluginConnectFailure(t *testing.T) {
+	isolateUserConfig(t)
+	t.Setenv("PATH", "")
+	cfg := config.Default()
+	cfg.Plugins = []config.PluginEntry{{Name: "broken", Command: "definitely-missing-reasonix-mcp", Tier: "lazy"}}
+	if err := cfg.SaveTo("reasonix.toml"); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	m := newTestChatTUI()
+	m.ctrl = control.New(control.Options{Host: plugin.NewHost()})
+	defer m.ctrl.Close()
+	m.host = m.ctrl.Host()
+	m.mcp = &mcpManager{
+		stage: mcpStageMode,
+		name:  "broken",
+		snapshot: mcpSnapshot{configPath: "reasonix.toml", servers: []mcpServerView{{
+			Name: "broken", Transport: "stdio", Status: "deferred", Configured: true, Tier: "lazy",
+		}}},
+	}
+
+	_, _ = m.applyMCPMode("background")
+
+	failures := m.ctrl.Host().Failures()
+	if len(failures) != 1 || failures[0].Name != "broken" {
+		t.Fatalf("Host.Failures() = %+v, want broken failure", failures)
+	}
+	v, ok := m.mcp.selectedServer()
+	if !ok {
+		t.Fatal("selected server missing after refresh")
+	}
+	if v.Status != "failed" {
+		t.Fatalf("server status = %q, want failed; server = %+v", v.Status, v)
+	}
+}
+
+func TestApplyMCPModeRecordsCodegraphConnectFailure(t *testing.T) {
+	isolateUserConfig(t)
+	t.Setenv("PATH", "")
+	t.Setenv("REASONIX_CACHE_DIR", t.TempDir())
+	cfg := config.Default()
+	cfg.Codegraph.Enabled = false
+	cfg.Codegraph.Tier = "lazy"
+	if err := cfg.SaveTo("reasonix.toml"); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	m := newTestChatTUI()
+	m.ctrl = control.New(control.Options{Host: plugin.NewHost()})
+	defer m.ctrl.Close()
+	m.host = m.ctrl.Host()
+	m.mcp = &mcpManager{
+		stage: mcpStageMode,
+		name:  "codegraph",
+		snapshot: mcpSnapshot{configPath: "reasonix.toml", servers: []mcpServerView{{
+			Name: "codegraph", Transport: "stdio", Status: "disabled", BuiltIn: true, Configured: true, Tier: "lazy",
+		}}},
+	}
+
+	_, _ = m.applyMCPMode("background")
+
+	failures := m.ctrl.Host().Failures()
+	if len(failures) != 1 || failures[0].Name != "codegraph" {
+		t.Fatalf("Host.Failures() = %+v, want codegraph failure", failures)
+	}
+	if !strings.Contains(failures[0].Error, "not installed") {
+		t.Fatalf("codegraph failure error = %q, want not installed", failures[0].Error)
+	}
+	v, ok := m.mcp.selectedServer()
+	if !ok {
+		t.Fatal("selected server missing after refresh")
+	}
+	if v.Status != "failed" {
+		t.Fatalf("codegraph status = %q, want failed; server = %+v", v.Status, v)
+	}
+}
+
+func TestDisableCodegraphPersistsEnabledFalse(t *testing.T) {
+	isolateUserConfig(t)
+	cfg := config.Default()
+	cfg.Codegraph.Enabled = true
+	cfg.Codegraph.Tier = "background"
+	if err := cfg.SaveTo("reasonix.toml"); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	m := newTestChatTUI()
+	m.ctrl = control.New(control.Options{Host: plugin.NewHost()})
+	defer m.ctrl.Close()
+	m.mcp = &mcpManager{
+		stage: mcpStageDetail,
+		name:  "codegraph",
+		snapshot: mcpSnapshot{configPath: "reasonix.toml", servers: []mcpServerView{{
+			Name: "codegraph", Transport: "stdio", Status: "connected", BuiltIn: true, Configured: true, AutoStart: true, Tier: "background",
+		}}},
+	}
+
+	_, _ = m.disableSelectedMCP(m.mcp.snapshot.servers[0])
+
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if loaded.Codegraph.Enabled {
+		t.Fatalf("codegraph enabled = true, want false")
 	}
 }
 

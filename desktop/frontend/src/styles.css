@@ -4585,9 +4585,16 @@ body {
   color: var(--fg-faint);
 }
 .cap-row__builtin {
-  font-size: 11px;
-  font-weight: 650;
-  color: var(--fg-faint);
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-soft));
+  color: color-mix(in srgb, var(--accent) 70%, var(--fg-dim));
+  font-size: 10px;
+  font-weight: 550;
+  letter-spacing: 0;
+  line-height: 1.35;
 }
 .cap-row--skill {
   align-items: center;

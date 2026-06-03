@@ -948,11 +948,11 @@ func (a *App) Capabilities() CapabilitiesView {
 	seen := map[string]bool{}
 	connected := map[string]bool{}
 	retainedDisabled := map[string]ServerView{}
-	codegraphConfigured := false
+	var loadedCfg *config.Config
 	configured := map[string]config.PluginEntry{}
 	var configuredEntries []config.PluginEntry
 	if cfg, err := config.Load(); err == nil {
-		codegraphConfigured = cfg.Codegraph.Enabled
+		loadedCfg = cfg
 		configuredEntries = append(configuredEntries, cfg.Plugins...)
 		for _, p := range configuredEntries {
 			configured[p.Name] = p
@@ -970,6 +970,8 @@ func (a *App) Capabilities() CapabilitiesView {
 			}
 			if p, ok := configured[s.Name]; ok {
 				view = withPluginConfig(view, p)
+			} else if s.Name == "codegraph" && loadedCfg != nil {
+				view = withCodegraphConfig(view, loadedCfg.Codegraph)
 			}
 			out.Servers = append(out.Servers, view)
 		}
@@ -980,13 +982,15 @@ func (a *App) Capabilities() CapabilitiesView {
 			}
 			if p, ok := configured[f.Name]; ok {
 				view = withPluginConfig(view, p)
+			} else if f.Name == "codegraph" && loadedCfg != nil {
+				view = withCodegraphConfig(view, loadedCfg.Codegraph)
 			}
 			out.Servers = append(out.Servers, view)
 		}
 	}
 	// Configured servers that are neither connected nor failed are either lazy
 	// (deferred), background/eager (initializing), or toggled off this session.
-	if len(configuredEntries) > 0 || codegraphConfigured {
+	if len(configuredEntries) > 0 || loadedCfg != nil {
 		for _, p := range configuredEntries {
 			if seen[p.Name] {
 				continue
@@ -1013,17 +1017,27 @@ func (a *App) Capabilities() CapabilitiesView {
 			out.Servers = append(out.Servers, withPluginConfig(ServerView{Name: p.Name, Status: status}, p))
 			seen[p.Name] = true
 		}
-		if codegraphConfigured && !seen["codegraph"] {
+		if loadedCfg != nil && !seen["codegraph"] {
+			status := "disabled"
+			if loadedCfg.Codegraph.Enabled {
+				switch loadedCfg.Codegraph.ResolvedTier() {
+				case "background", "eager":
+					status = "initializing"
+				default:
+					status = "deferred"
+				}
+			}
 			if s, ok := disabled["codegraph"]; ok {
 				s.Status = "disabled"
 				s.Transport = "stdio"
 				s.BuiltIn = true
+				s = withCodegraphConfig(s, loadedCfg.Codegraph)
 				s.Error = ""
 				out.Servers = append(out.Servers, s)
 				retainedDisabled["codegraph"] = s
 				delete(disabled, "codegraph")
 			} else {
-				out.Servers = append(out.Servers, ServerView{Name: "codegraph", Transport: "stdio", Status: "initializing", BuiltIn: true})
+				out.Servers = append(out.Servers, withCodegraphConfig(ServerView{Name: "codegraph", Status: status}, loadedCfg.Codegraph))
 			}
 			seen["codegraph"] = true
 		}
@@ -1072,6 +1086,17 @@ func withPluginConfig(v ServerView, p config.PluginEntry) ServerView {
 	auth := mcpdiag.DiagnoseAuth(v.Transport, v.Status, v.Error, v.URL, v.AuthConfigured)
 	v.AuthStatus = auth.Status
 	v.AuthURL = auth.URL
+	return v
+}
+
+func withCodegraphConfig(v ServerView, c config.CodegraphConfig) ServerView {
+	v.Name = "codegraph"
+	v.Transport = "stdio"
+	v.BuiltIn = true
+	v.Configured = true
+	v.AutoStart = c.ShouldAutoStart()
+	v.Tier = c.ResolvedTier()
+	v.AuthStatus = mcpdiag.AuthNone
 	return v
 }
 
@@ -1337,6 +1362,9 @@ func (a *App) UpdateMCPServer(name string, in MCPServerInput) error {
 
 // RemoveMCPServer disconnects a live server and drops it from config (the row's ✕).
 func (a *App) RemoveMCPServer(name string) error {
+	if name == "codegraph" {
+		return fmt.Errorf("codegraph is built in; it cannot be removed")
+	}
 	if a.ctrl == nil {
 		return fmt.Errorf("no active session")
 	}
@@ -1387,6 +1415,9 @@ func (a *App) SetMCPServerEnabled(name string, enabled bool) error {
 	if a.ctrl == nil {
 		return fmt.Errorf("no active session")
 	}
+	if name == "codegraph" {
+		return a.setCodegraphEnabled(enabled)
+	}
 	if enabled {
 		_, err := a.ctrl.ConnectConfiguredMCPServer(name)
 		if err == nil {
@@ -1416,7 +1447,7 @@ func (a *App) SetMCPServerEnabled(name string, enabled bool) error {
 // "connect now" remain separate controls.
 func (a *App) SetMCPServerTier(name, tier string) error {
 	if name == "codegraph" {
-		return fmt.Errorf("codegraph is built in; configure it with [codegraph]")
+		return a.setCodegraphTier(tier)
 	}
 	tier = normalizeMCPTier(tier)
 	cfg, err := config.Load()
@@ -1428,6 +1459,10 @@ func (a *App) SetMCPServerTier(name, tier string) error {
 	for i := range cfg.Plugins {
 		if cfg.Plugins[i].Name == name {
 			cfg.Plugins[i].Tier = tier
+			if !cfg.Plugins[i].ShouldAutoStart() {
+				on := true
+				cfg.Plugins[i].AutoStart = &on
+			}
 			updated = cfg.Plugins[i]
 			found = true
 			break
@@ -1447,6 +1482,66 @@ func (a *App) SetMCPServerTier(name, tier string) error {
 		a.mu.Lock()
 		delete(a.disabledMCP, name)
 		a.mu.Unlock()
+	}
+	return nil
+}
+
+func (a *App) setCodegraphEnabled(enabled bool) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	cfg.Codegraph.Enabled = enabled
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	if enabled {
+		a.mu.Lock()
+		delete(a.disabledMCP, "codegraph")
+		a.mu.Unlock()
+		if _, err := a.ctrl.ConnectConfiguredMCPServer("codegraph"); err != nil {
+			recordCodegraphFailure(a.ctrl, cfg.Codegraph, err)
+			return nil
+		}
+		return nil
+	}
+	if h := a.ctrl.Host(); h != nil {
+		h.ClearFailure("codegraph")
+	}
+	a.ctrl.DisconnectMCPServer("codegraph")
+	s := withCodegraphConfig(ServerView{Name: "codegraph", Status: "disabled"}, cfg.Codegraph)
+	a.mu.Lock()
+	if a.disabledMCP == nil {
+		a.disabledMCP = map[string]ServerView{}
+	}
+	a.disabledMCP["codegraph"] = s
+	a.mcpOrder = mergeServerOrder(a.mcpOrder, []ServerView{s})
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *App) setCodegraphTier(tier string) error {
+	tier = normalizeMCPTier(tier)
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	cfg.Codegraph.Enabled = true
+	cfg.Codegraph.Tier = tier
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	if a.ctrl == nil {
+		return nil
+	}
+	a.mu.Lock()
+	delete(a.disabledMCP, "codegraph")
+	a.mu.Unlock()
+	if tier != "lazy" && !mcpConnected(a.ctrl, "codegraph") {
+		if _, err := a.ctrl.ConnectConfiguredMCPServer("codegraph"); err != nil {
+			recordCodegraphFailure(a.ctrl, cfg.Codegraph, err)
+			return nil
+		}
 	}
 	return nil
 }
@@ -1510,6 +1605,22 @@ func recordMCPFailure(ctrl *control.Controller, e config.PluginEntry, err error)
 		Env:     exp.Env,
 		URL:     exp.URL,
 		Headers: exp.Headers,
+	}, err)
+}
+
+func recordCodegraphFailure(ctrl *control.Controller, c config.CodegraphConfig, err error) {
+	if ctrl == nil || ctrl.Host() == nil || err == nil {
+		return
+	}
+	cmd := strings.TrimSpace(c.Path)
+	if cmd == "" {
+		cmd = "codegraph"
+	}
+	ctrl.Host().RecordFailure(plugin.Spec{
+		Name:    "codegraph",
+		Type:    "stdio",
+		Command: cmd,
+		Args:    []string{"serve", "--mcp"},
 	}, err)
 }
 

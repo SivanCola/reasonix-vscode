@@ -309,9 +309,9 @@ func (m chatTUI) buildMCPSnapshot() mcpSnapshot {
 	}
 	configured := map[string]config.PluginEntry{}
 	var configuredEntries []config.PluginEntry
-	codegraphEnabled := false
+	var loadedCfg *config.Config
 	if cfg != nil {
-		codegraphEnabled = cfg.Codegraph.Enabled
+		loadedCfg = cfg
 		configuredEntries = append(configuredEntries, cfg.Plugins...)
 		for _, p := range configuredEntries {
 			configured[p.Name] = p
@@ -328,6 +328,8 @@ func (m chatTUI) buildMCPSnapshot() mcpSnapshot {
 			}
 			if p, ok := configured[s.Name]; ok {
 				v = withMCPPluginConfig(v, p)
+			} else if s.Name == "codegraph" && loadedCfg != nil {
+				v = withMCPCodegraphConfig(v, loadedCfg.Codegraph)
 			}
 			snap.servers = append(snap.servers, v)
 			seen[s.Name] = true
@@ -340,6 +342,8 @@ func (m chatTUI) buildMCPSnapshot() mcpSnapshot {
 			}
 			if p, ok := configured[f.Name]; ok {
 				v = withMCPPluginConfig(v, p)
+			} else if f.Name == "codegraph" && loadedCfg != nil {
+				v = withMCPCodegraphConfig(v, loadedCfg.Codegraph)
 			}
 			snap.servers = append(snap.servers, v)
 			seen[f.Name] = true
@@ -362,14 +366,16 @@ func (m chatTUI) buildMCPSnapshot() mcpSnapshot {
 		snap.servers = append(snap.servers, v)
 		seen[p.Name] = true
 	}
-	if codegraphEnabled && !seen["codegraph"] {
+	if loadedCfg != nil && !seen["codegraph"] {
 		status := "initializing"
-		if m.mcpDisabled["codegraph"] {
+		if m.mcpDisabled["codegraph"] || !loadedCfg.Codegraph.Enabled {
 			status = "disabled"
+		} else if loadedCfg.Codegraph.ResolvedTier() == "lazy" {
+			status = "deferred"
 		}
-		snap.servers = append(snap.servers, mcpServerView{
-			Name: "codegraph", Transport: "stdio", Status: status, BuiltIn: true,
-		})
+		snap.servers = append(snap.servers, withMCPCodegraphConfig(mcpServerView{
+			Name: "codegraph", Status: status,
+		}, loadedCfg.Codegraph))
 	}
 	return snap
 }
@@ -397,6 +403,17 @@ func withMCPPluginConfig(v mcpServerView, p config.PluginEntry) mcpServerView {
 	auth := mcpdiag.DiagnoseAuth(v.Transport, v.Status, v.Error, v.URL, v.authConfigured)
 	v.AuthStatus = auth.Status
 	v.AuthURL = auth.URL
+	return v
+}
+
+func withMCPCodegraphConfig(v mcpServerView, c config.CodegraphConfig) mcpServerView {
+	v.Name = "codegraph"
+	v.Transport = "stdio"
+	v.BuiltIn = true
+	v.Configured = true
+	v.AutoStart = c.ShouldAutoStart()
+	v.Tier = c.ResolvedTier()
+	v.AuthStatus = mcpdiag.AuthNone
 	return v
 }
 

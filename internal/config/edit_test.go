@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -376,6 +377,46 @@ func TestAutoStartPlugins(t *testing.T) {
 	got := c.AutoStartPlugins()
 	if len(got) != 2 || got[0].Name != "implicit" || got[1].Name != "enabled" {
 		t.Fatalf("AutoStartPlugins = %+v, want implicit + enabled", got)
+	}
+}
+
+func TestCodegraphDefaultEnabledForUpgrades(t *testing.T) {
+	c := Default()
+	if !c.Codegraph.Enabled {
+		t.Fatal("default codegraph enabled = false; existing configs without a [codegraph] section would lose it on upgrade")
+	}
+	if !c.Codegraph.AutoInstall {
+		t.Fatal("default codegraph auto_install = false, want true")
+	}
+	if c.Codegraph.Tier != "" {
+		t.Fatalf("default codegraph tier = %q, want unset (boot then preserves warm→eager/cold→background)", c.Codegraph.Tier)
+	}
+}
+
+func TestLoadForEditPreservesCodegraphWithoutSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "reasonix.toml")
+	if err := os.WriteFile(path, []byte("default_model = \"x\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c := LoadForEdit(path); !c.Codegraph.Enabled {
+		t.Fatal("a config omitting [codegraph] disabled codegraph; an upgrade must keep it on")
+	}
+}
+
+func TestLoadFirstRunDisablesCodegraph(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("AppData", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Codegraph.Enabled {
+		t.Fatal("first run (no config file anywhere) left codegraph enabled; new users should start without it")
 	}
 }
 

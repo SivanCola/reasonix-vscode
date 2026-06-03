@@ -118,16 +118,29 @@ type StatuslineConfig struct {
 
 // CodegraphConfig governs the built-in CodeGraph MCP server — symbol/call-graph
 // code intelligence (tree-sitter + SQLite) that gives the agent codegraph_*
-// search / context / explore / trace / node tools. Enabled defaults to true; set
-// enabled = false to drop those tools and fall back to grep/glob. AutoInstall
-// (default true) lets reasonix fetch the CodeGraph runtime into its cache on first
-// use; set false to require an explicit `reasonix codegraph install` (e.g. for
-// air-gapped or headless runs). Path overrides binary resolution; empty resolves
-// the cache, then a `codegraph` on PATH, then a bundle beside the executable.
+// search / context / explore / trace / node tools. Enabled defaults to true so
+// upgrades keep it for existing configs; first-run scaffolds write enabled =
+// false so only brand-new users start without it. AutoInstall (default true)
+// lets reasonix fetch the CodeGraph runtime into its cache when CodeGraph is
+// enabled but missing; set false to require an explicit `reasonix codegraph
+// install` (e.g. for air-gapped or headless runs). Path overrides binary
+// resolution; empty resolves the cache, then a `codegraph` on PATH, then a
+// bundle beside the executable. Tier matches ordinary MCP servers (lazy,
+// background, eager); when unset it preserves the historical warm→eager /
+// cold→background startup.
 type CodegraphConfig struct {
 	Enabled     bool   `toml:"enabled"`
 	AutoInstall bool   `toml:"auto_install"`
 	Path        string `toml:"path"`
+	Tier        string `toml:"tier"`
+}
+
+func (c CodegraphConfig) ShouldAutoStart() bool {
+	return c.Enabled
+}
+
+func (c CodegraphConfig) ResolvedTier() string {
+	return resolvedMCPTier(c.Tier)
 }
 
 // NetworkConfig controls ordinary outbound HTTP traffic such as model providers,
@@ -459,7 +472,11 @@ func (e PluginEntry) ShouldAutoStart() bool {
 // the project default applied. Unknown values fall back to "lazy" so a typo
 // never forces a slow boot.
 func (e PluginEntry) ResolvedTier() string {
-	switch strings.ToLower(strings.TrimSpace(e.Tier)) {
+	return resolvedMCPTier(e.Tier)
+}
+
+func resolvedMCPTier(tier string) string {
+	switch strings.ToLower(strings.TrimSpace(tier)) {
 	case "eager":
 		return "eager"
 	case "background":
@@ -526,10 +543,10 @@ func Default() *Config {
 		// so an absent [sandbox] in a user's file keeps egress (zero value would
 		// wrongly deny it).
 		Sandbox: SandboxConfig{Bash: "enforce", Network: true},
-		// CodeGraph code-intelligence on by default: when it resolves it is injected
-		// as a built-in MCP server, and AutoInstall fetches it into the cache on
-		// first use. Set enabled = false to opt out, or auto_install = false to
-		// require an explicit `reasonix codegraph install`.
+		// CodeGraph code-intelligence defaults on so existing configs (which never
+		// wrote a [codegraph] section) keep it after an upgrade. First-run scaffolds
+		// write enabled = false instead, so only brand-new users start without it.
+		// AutoInstall fetches the runtime into the cache when enabled and missing.
 		Codegraph: CodegraphConfig{Enabled: true, AutoInstall: true},
 		// LSP tools on by default, but dormant until a language server is on PATH;
 		// a missing server yields an install hint rather than an error.
@@ -556,7 +573,11 @@ func Load() (*Config, error) {
 		tomlSources = append(tomlSources, uc)
 	}
 	tomlSources = append(tomlSources, "reasonix.toml")
+	sawConfigFile := false
 	for _, path := range tomlSources {
+		if _, err := os.Stat(path); err == nil {
+			sawConfigFile = true
+		}
 		if err := mergeFile(cfg, path); err != nil {
 			return nil, err
 		}
@@ -580,6 +601,12 @@ func Load() (*Config, error) {
 	cfg.mergeMCPJSON(entries)
 	normalizeLegacyEffort(cfg)
 	backfillDeepSeekPro(cfg)
+	// First run (no config file anywhere): keep CodeGraph off until the user opts
+	// in. An existing config — even one without a [codegraph] section — keeps the
+	// built-in default (on), so an upgrade never silently drops code intelligence.
+	if !sawConfigFile {
+		cfg.Codegraph.Enabled = false
+	}
 	return cfg, nil
 }
 

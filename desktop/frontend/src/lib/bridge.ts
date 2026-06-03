@@ -290,14 +290,14 @@ function makeMockApp(): AppBindings {
     {
       name: "codegraph",
       transport: "stdio",
-      status: "connected",
+      status: "disabled",
       builtIn: true,
       configured: true,
-      autoStart: true,
-      tier: "background",
-      tools: 4,
+      autoStart: false,
+      tier: "lazy",
+      tools: 0,
       prompts: 0,
-      resources: 1,
+      resources: 0,
       toolList: [
         { name: "search", description: "Search symbols, files, and text in the workspace." },
         { name: "context", description: "Fetch surrounding source context for a symbol or file." },
@@ -739,6 +739,7 @@ function makeMockApp(): AppBindings {
           ? {
               ...s,
               status: enabled ? "connected" : "disabled",
+              autoStart: s.builtIn ? enabled : s.autoStart,
               tools: enabled ? s.tools || 4 : 0,
               error: undefined,
               authStatus: !enabled && s.transport !== "stdio" ? "possible" : undefined,
@@ -750,9 +751,9 @@ function makeMockApp(): AppBindings {
     async SetMCPServerTier(name: string, tier: string) {
       capServers = capServers.map((s) => {
         if (s.name !== name) return s;
-        if (tier === "lazy") return { ...s, tier };
+        if (tier === "lazy") return { ...s, tier, autoStart: true };
         const tools = s.tools || (s.transport === "stdio" ? 3 : 5);
-        return { ...s, tier, status: "connected", tools, error: undefined, authStatus: undefined, authUrl: undefined };
+        return { ...s, tier, autoStart: true, status: "connected", tools, error: undefined, authStatus: undefined, authUrl: undefined };
       });
     },
     async SlashArgs(input: string) {

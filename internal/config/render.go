@@ -170,6 +170,21 @@ func RenderTOML(c *Config) string {
 		b.WriteString("]\n\n")
 	}
 
+	b.WriteString("[codegraph]\n")
+	fmt.Fprintf(&b, "enabled      = %v   # built-in MCP server; off by default for first-run sessions\n", c.Codegraph.Enabled)
+	fmt.Fprintf(&b, "auto_install = %v   # fetch the runtime when CodeGraph is enabled but missing\n", c.Codegraph.AutoInstall)
+	if c.Codegraph.Path != "" {
+		fmt.Fprintf(&b, "path         = %q   # optional launcher override\n", c.Codegraph.Path)
+	} else {
+		b.WriteString("# path       = \"\"   # empty = cache, then PATH, then a bundle beside reasonix\n")
+	}
+	if strings.TrimSpace(c.Codegraph.Tier) != "" {
+		fmt.Fprintf(&b, "tier         = %q   # lazy|background|eager\n", c.Codegraph.ResolvedTier())
+	} else {
+		b.WriteString("# tier       = \"lazy\"   # lazy|background|eager\n")
+	}
+	b.WriteString("\n")
+
 	b.WriteString("[skills]\n")
 	if len(c.Skills.Paths) > 0 {
 		fmt.Fprintf(&b, "paths = %s   # extra custom skill roots\n", renderStringArray(c.Skills.Paths))

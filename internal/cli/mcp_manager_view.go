@@ -275,7 +275,11 @@ func mcpActionsFor(v mcpServerView, configPath string) []mcpActionItem {
 		out = append(out, mcpActionItem{mcpActionClearAuth, "Clear authentication"})
 	}
 	if v.Status != "disabled" {
-		out = append(out, mcpActionItem{mcpActionDisable, "Disable for this session"})
+		label := "Disable for this session"
+		if v.BuiltIn && v.Name == "codegraph" {
+			label = "Disable"
+		}
+		out = append(out, mcpActionItem{mcpActionDisable, label})
 	}
 	if !v.BuiltIn {
 		out = append(out, mcpActionItem{mcpActionRemove, "Remove server"})
@@ -289,7 +293,11 @@ func appendMCPFailureSecondaryActions(out []mcpActionItem, v mcpServerView, conf
 	}
 	out = appendMCPConfigActions(out, v, configPath)
 	if v.Status != "disabled" {
-		out = append(out, mcpActionItem{mcpActionDisable, "Disable for this session"})
+		label := "Disable for this session"
+		if v.BuiltIn && v.Name == "codegraph" {
+			label = "Disable"
+		}
+		out = append(out, mcpActionItem{mcpActionDisable, label})
 	}
 	if !v.BuiltIn {
 		out = append(out, mcpActionItem{mcpActionRemove, "Remove server"})
@@ -298,9 +306,9 @@ func appendMCPFailureSecondaryActions(out []mcpActionItem, v mcpServerView, conf
 }
 
 func appendMCPConfigActions(out []mcpActionItem, v mcpServerView, configPath string) []mcpActionItem {
-	if v.Configured && !v.BuiltIn {
+	if v.Configured {
 		out = append(out, mcpActionItem{mcpActionMode, "Change connection mode"})
-		if configPath != "" {
+		if !v.BuiltIn && configPath != "" {
 			out = append(out, mcpActionItem{mcpActionEdit, "Edit config"})
 		}
 	}

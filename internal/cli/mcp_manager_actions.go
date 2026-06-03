@@ -15,6 +15,7 @@ import (
 	"reasonix/internal/config"
 	"reasonix/internal/control"
 	"reasonix/internal/mcpdiag"
+	"reasonix/internal/plugin"
 )
 
 func (m chatTUI) applyMCPAction(v mcpServerView, action mcpAction) (tea.Model, tea.Cmd) {
@@ -49,6 +50,20 @@ func (m chatTUI) connectSelectedMCP(v mcpServerView) (tea.Model, tea.Cmd) {
 		m.notice("mcp: no active session")
 		return m, nil
 	}
+	if v.BuiltIn && v.Name == "codegraph" {
+		cfg, err := config.Load()
+		if err != nil {
+			m.notice("mcp connect: " + err.Error())
+			return m, nil
+		}
+		if !cfg.Codegraph.Enabled {
+			cfg.Codegraph.Enabled = true
+			if err := cfg.Save(); err != nil {
+				m.notice("mcp connect: " + err.Error())
+				return m, nil
+			}
+		}
+	}
 	if v.Status == "connected" {
 		m.ctrl.DisconnectMCPServer(v.Name)
 	}
@@ -75,6 +90,23 @@ func (m chatTUI) disableSelectedMCP(v mcpServerView) (tea.Model, tea.Cmd) {
 		m.notice("mcp: no active session")
 		return m, nil
 	}
+	persisted := false
+	if v.BuiltIn && v.Name == "codegraph" {
+		cfg, err := config.Load()
+		if err != nil {
+			m.notice("mcp disable: " + err.Error())
+			return m, nil
+		}
+		cfg.Codegraph.Enabled = false
+		if err := cfg.Save(); err != nil {
+			m.notice("mcp disable: " + err.Error())
+			return m, nil
+		}
+		persisted = true
+		if h := m.ctrl.Host(); h != nil {
+			h.ClearFailure(v.Name)
+		}
+	}
 	if m.mcpDisabled == nil {
 		m.mcpDisabled = map[string]bool{}
 	}
@@ -86,7 +118,11 @@ func (m chatTUI) disableSelectedMCP(v mcpServerView) (tea.Model, tea.Cmd) {
 		m.mcp.stage = mcpStageDetail
 		m.mcp.selectName(v.Name)
 	}
-	m.notice("disabled " + v.Name + " for this session")
+	if persisted {
+		m.notice("disabled " + v.Name)
+	} else {
+		m.notice("disabled " + v.Name + " for this session")
+	}
 	return m, nil
 }
 
@@ -128,22 +164,45 @@ func (m chatTUI) applyMCPMode(tier string) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	if v.BuiltIn {
-		m.notice("codegraph is built in; configure it with [codegraph]")
-		return m, nil
-	}
 	cfg, err := config.Load()
 	if err != nil {
 		m.notice("mcp mode: " + err.Error())
 		return m, nil
 	}
+	if v.BuiltIn && v.Name == "codegraph" {
+		cfg.Codegraph.Enabled = true
+		cfg.Codegraph.Tier = normalizeMCPTierForCLI(tier)
+		if err := cfg.Save(); err != nil {
+			m.notice("mcp mode: " + err.Error())
+			return m, nil
+		}
+		if m.mcpDisabled != nil {
+			delete(m.mcpDisabled, v.Name)
+		}
+		if tier != "lazy" && m.ctrl != nil && !mcpConnected(m.ctrl, v.Name) {
+			if _, err := m.ctrl.ConnectConfiguredMCPServer(v.Name); err != nil {
+				recordMCPModeCodegraphFailure(m.ctrl, cfg.Codegraph, err)
+				m.notice("saved connection mode, but connect failed: " + err.Error())
+			}
+			m.host = m.ctrl.Host()
+		}
+		m.refreshMCPManager()
+		if m.mcp != nil {
+			m.mcp.stage = mcpStageDetail
+			m.mcp.selectName(v.Name)
+		}
+		m.notice("updated connection mode for " + v.Name)
+		return m, nil
+	}
 	found := false
+	var selected config.PluginEntry
 	for i := range cfg.Plugins {
 		if cfg.Plugins[i].Name == v.Name {
 			cfg.Plugins[i].Tier = normalizeMCPTierForCLI(tier)
 			if !cfg.Plugins[i].ShouldAutoStart() {
 				cfg.Plugins[i].AutoStart = mcpBoolPtr(true)
 			}
+			selected = cfg.Plugins[i]
 			found = true
 			break
 		}
@@ -161,6 +220,7 @@ func (m chatTUI) applyMCPMode(tier string) (tea.Model, tea.Cmd) {
 	}
 	if tier != "lazy" && m.ctrl != nil && !mcpConnected(m.ctrl, v.Name) {
 		if _, err := m.ctrl.ConnectConfiguredMCPServer(v.Name); err != nil {
+			recordMCPModePluginFailure(m.ctrl, selected, err)
 			m.notice("saved connection mode, but connect failed: " + err.Error())
 		}
 		m.host = m.ctrl.Host()
@@ -172,6 +232,38 @@ func (m chatTUI) applyMCPMode(tier string) (tea.Model, tea.Cmd) {
 	}
 	m.notice("updated connection mode for " + v.Name)
 	return m, nil
+}
+
+func recordMCPModePluginFailure(ctrl *control.Controller, e config.PluginEntry, err error) {
+	if ctrl == nil || ctrl.Host() == nil || err == nil {
+		return
+	}
+	exp := e.ExpandedPlugin()
+	ctrl.Host().RecordFailure(plugin.Spec{
+		Name:    exp.Name,
+		Type:    exp.Type,
+		Command: exp.Command,
+		Args:    exp.Args,
+		Env:     exp.Env,
+		URL:     exp.URL,
+		Headers: exp.Headers,
+	}, err)
+}
+
+func recordMCPModeCodegraphFailure(ctrl *control.Controller, c config.CodegraphConfig, err error) {
+	if ctrl == nil || ctrl.Host() == nil || err == nil {
+		return
+	}
+	cmd := strings.TrimSpace(c.Path)
+	if cmd == "" {
+		cmd = "codegraph"
+	}
+	ctrl.Host().RecordFailure(plugin.Spec{
+		Name:    "codegraph",
+		Type:    "stdio",
+		Command: cmd,
+		Args:    []string{"serve", "--mcp"},
+	}, err)
 }
 
 func (m chatTUI) openMCPConfig() (tea.Model, tea.Cmd) {

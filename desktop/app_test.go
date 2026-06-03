@@ -167,6 +167,39 @@ args = ["-y", "@playwright/mcp"]
 	t.Fatalf("playwright MCP missing from Capabilities: %+v", view.Servers)
 }
 
+func TestCapabilitiesShowsDefaultCodegraphDisabled(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("AppData", t.TempDir())
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	app := NewApp()
+	app.ctrl = control.New(control.Options{Host: plugin.NewHost()})
+	defer app.ctrl.Close()
+
+	view := app.Capabilities()
+	for _, s := range view.Servers {
+		if s.Name == "codegraph" {
+			if s.Status != "disabled" {
+				t.Fatalf("codegraph status = %q, want disabled; server = %+v", s.Status, s)
+			}
+			if !s.BuiltIn || !s.Configured {
+				t.Fatalf("codegraph builtIn/configured = %v/%v, want true/true; server = %+v", s.BuiltIn, s.Configured, s)
+			}
+			if s.AutoStart {
+				t.Fatalf("codegraph autoStart = true, want false; server = %+v", s)
+			}
+			if s.Tier != "lazy" {
+				t.Fatalf("codegraph tier = %q, want lazy; server = %+v", s.Tier, s)
+			}
+			return
+		}
+	}
+	t.Fatalf("codegraph missing from Capabilities: %+v", view.Servers)
+}
+
 func TestCapabilitiesMarksDeferredRemoteMCPAuthPossible(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -496,6 +529,97 @@ tier = "lazy"
 		}
 	}
 	t.Fatalf("broken MCP missing from Capabilities: %+v", view.Servers)
+}
+
+func TestSetMCPServerTierPersistsCodegraphConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("AppData", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("REASONIX_CACHE_DIR", t.TempDir()) // isolate the codegraph bundle cache so Resolve fails deterministically
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "reasonix.toml"), []byte(`
+[codegraph]
+enabled = false
+auto_install = true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp()
+	app.ctrl = control.New(control.Options{Host: plugin.NewHost()})
+	defer app.ctrl.Close()
+
+	if err := app.SetMCPServerTier("codegraph", "background"); err != nil {
+		t.Fatalf("SetMCPServerTier(codegraph): %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Codegraph.Enabled {
+		t.Fatal("codegraph enabled = false, want true after selecting a startup tier")
+	}
+	if got := cfg.Codegraph.Tier; got != "background" {
+		t.Fatalf("codegraph tier = %q, want background", got)
+	}
+	if !mcpFailed(app.ctrl, "codegraph") {
+		t.Fatalf("Host.Failures() = %+v, want codegraph failure recorded for missing runtime", app.ctrl.Host().Failures())
+	}
+	view := app.Capabilities()
+	for _, s := range view.Servers {
+		if s.Name == "codegraph" {
+			if s.Status != "failed" {
+				t.Fatalf("codegraph status = %q, want failed; server = %+v", s.Status, s)
+			}
+			if !s.BuiltIn || !s.Configured || s.Tier != "background" || !s.AutoStart {
+				t.Fatalf("codegraph view did not preserve built-in config: %+v", s)
+			}
+			return
+		}
+	}
+	t.Fatalf("codegraph missing from Capabilities: %+v", view.Servers)
+}
+
+func TestSetMCPServerEnabledPersistsCodegraphOff(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "reasonix.toml"), []byte(`
+[codegraph]
+enabled = true
+tier = "lazy"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp()
+	app.ctrl = control.New(control.Options{Host: plugin.NewHost()})
+	defer app.ctrl.Close()
+
+	if err := app.SetMCPServerEnabled("codegraph", false); err != nil {
+		t.Fatalf("SetMCPServerEnabled(codegraph,false): %v", err)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Codegraph.Enabled {
+		t.Fatal("codegraph enabled = true, want false after disabling")
+	}
+	view := app.Capabilities()
+	for _, s := range view.Servers {
+		if s.Name == "codegraph" {
+			if s.Status != "disabled" || s.AutoStart {
+				t.Fatalf("codegraph disabled view = %+v, want disabled with autoStart=false", s)
+			}
+			return
+		}
+	}
+	t.Fatalf("codegraph missing from Capabilities: %+v", view.Servers)
 }
 
 func TestCapabilitiesKeepsFailedMCPConfiguredTierAfterRestart(t *testing.T) {

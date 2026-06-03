@@ -728,7 +728,7 @@ function FailedServersNotice({
           const open = expanded.has(s.name);
           const error = s.error || t("caps.failed");
           const actionLabel = serverActionLabel(s, t);
-          const canConfigure = s.configured && !s.builtIn;
+          const canConfigure = s.configured;
           const handlePrimaryAction = () => {
             if (shouldOpenAuth(s)) {
               openExternal((s.authUrl || "").trim());
@@ -900,6 +900,7 @@ function ServerRow({
             <div className="cap-row__head">
               <span className="cap-row__name">{s.name}</span>
               <span className="cap-row__transport">{s.transport}</span>
+              {s.builtIn && <span className="cap-row__builtin">{t("caps.builtIn")}</span>}
             </div>
             <div className="cap-row__sub">{sub}</div>
           </div>
@@ -921,14 +922,6 @@ function ServerRow({
                   </button>
                 ) : s.status === "initializing" ? (
                   <span className="cap-row__pending">{t("caps.initializingShort")}</span>
-                ) : s.builtIn ? (
-                  s.status === "disabled" ? (
-                    <button className="btn btn--small" disabled={busy} onClick={() => onToggle(true)}>
-                      {t("caps.enable")}
-                    </button>
-                  ) : (
-                    <span className="cap-row__builtin">{t("caps.builtIn")}</span>
-                  )
                 ) : (
                   <Tooltip label={enabled ? t("caps.disable") : t("caps.enable")}>
                     <label className="cap-switch">
@@ -1017,12 +1010,13 @@ function ServerDetails({
 }) {
   const t = useT();
   const command = serverCommand(s);
-  const canConfigure = s.configured && !s.builtIn;
-  const canConnectNow = !s.builtIn && (s.status === "deferred" || s.status === "disabled");
+  const canConfigure = s.configured;
+  const canEditConfig = s.configured && !s.builtIn;
+  const canConnectNow = s.status === "deferred" || s.status === "disabled";
   const canShowTools = (s.tools ?? 0) > 0 || (tools?.length ?? 0) > 0;
   const showClearAuth = canClearAuth(s);
   const authLabel = serverAuthLabel(s, t);
-  if (editing && canConfigure) {
+  if (editing && canEditConfig) {
     return (
       <div className="cap-server-details">
         <EditServerForm s={s} busy={busy} onCancel={onCancelEdit} onSave={onUpdate} />
@@ -1090,12 +1084,12 @@ function ServerDetails({
                 {t("caps.clearAuth")}
               </button>
             )}
-            {canConfigure && (
+            {canEditConfig && (
               <button className="btn btn--small" disabled={busy} onClick={onEdit}>
                 {t("caps.editConfig")}
               </button>
             )}
-            {canConfigure &&
+            {canEditConfig &&
               (confirming ? (
                 <>
                   <button className="btn btn--small" disabled={busy} onClick={onRemove}>
