@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -102,9 +103,15 @@ func TestScheduleSnapshotCoalesces(t *testing.T) {
 	a, tab := appWithTab(t, path)
 	_ = a
 
+	var wg sync.WaitGroup
 	for i := 0; i < 64; i++ {
-		go tab.sink.Emit(event.Event{Kind: event.TurnDone})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tab.sink.Emit(event.Event{Kind: event.TurnDone})
+		}()
 	}
+	wg.Wait()
 
 	waitForFile(t, path, "acknowledged")
 }
