@@ -1386,10 +1386,17 @@ type ProjectNode struct {
 // history panel can list them, but the project tree cannot. Give each such
 // session a deterministic Global topic so every old conversation has a direct
 // sidebar entry without guessing a project workspace.
+// legacyMigrationMu serializes the lockless load-modify-save of the projects /
+// topic-title files: this migration runs from every concurrent buildTabController
+// and from ListProjectTree, so without it parallel runs lose each other's appends.
+var legacyMigrationMu sync.Mutex
+
 func migrateLegacySessionsIntoGlobalTopics(dir string) []string {
 	if strings.TrimSpace(dir) == "" {
 		return nil
 	}
+	legacyMigrationMu.Lock()
+	defer legacyMigrationMu.Unlock()
 	infos, err := agent.ListSessions(dir)
 	if err != nil || len(infos) == 0 {
 		return nil
@@ -1428,6 +1435,12 @@ func migrateLegacySessionsIntoGlobalTopics(dir string) []string {
 
 		meta, err := agent.EnsureBranchMeta(info.Path)
 		if err != nil {
+			continue
+		}
+		// Only adopt genuinely-global, unscoped legacy sessions. A session that
+		// already carries a project scope or workspace root is not legacy — never
+		// strip its binding into Global.
+		if meta.Scope == "project" || strings.TrimSpace(meta.WorkspaceRoot) != "" {
 			continue
 		}
 		meta.Scope = "global"

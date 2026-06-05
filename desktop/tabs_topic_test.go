@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -881,5 +883,68 @@ func TestTrashTopicMovesOpenSessionToTrash(t *testing.T) {
 	}
 	if got := loadTopicTitle(projectRoot, topicID); got != "" {
 		t.Fatalf("topic title should be removed, got %q", got)
+	}
+}
+
+func TestLegacyMigrationSkipsProjectScopedSessions(t *testing.T) {
+	isolateDesktopUserDirs(t)
+	dir := config.SessionDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := writeLegacySession(t, dir, "scoped.jsonl", "hello", time.Now())
+	meta, err := agent.EnsureBranchMeta(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.Scope = "project"
+	meta.WorkspaceRoot = filepath.Join(t.TempDir(), "proj")
+	meta.TopicID = ""
+	if err := agent.SaveBranchMeta(path, meta); err != nil {
+		t.Fatal(err)
+	}
+
+	migrateLegacySessionsIntoGlobalTopics(dir)
+
+	got, err := agent.EnsureBranchMeta(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Scope != "project" || got.WorkspaceRoot != meta.WorkspaceRoot {
+		t.Fatalf("project-scoped legacy session must not be forced into Global: %+v", got)
+	}
+}
+
+func TestLegacyMigrationConcurrentRunsHaveNoLostUpdates(t *testing.T) {
+	isolateDesktopUserDirs(t)
+	dir := config.SessionDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const n = 8
+	want := make(map[string]bool, n)
+	for i := 0; i < n; i++ {
+		p := writeLegacySession(t, dir, fmt.Sprintf("legacy-%d.jsonl", i), "hi", time.Now())
+		want[legacySessionTopicID(p)] = true
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			migrateLegacySessionsIntoGlobalTopics(dir)
+		}()
+	}
+	wg.Wait()
+
+	gotSet := map[string]bool{}
+	for _, id := range loadProjectsFile().GlobalTopics {
+		gotSet[id] = true
+	}
+	for id := range want {
+		if !gotSet[id] {
+			t.Fatalf("concurrent migration lost topic %q; GlobalTopics=%v", id, loadProjectsFile().GlobalTopics)
+		}
 	}
 }
