@@ -459,6 +459,15 @@ type ProviderEntry struct {
 	// Empty = provider default.
 	Thinking string `toml:"thinking"`
 	Effort   string `toml:"effort"`
+	// SupportedEfforts lists the /effort levels this provider/model exposes.
+	// When non-empty, it overrides the built-in defaults derived from
+	// Kind/BaseURL and makes /effort configurable. "auto" is the implicit
+	// prefix — always accepted. DefaultEffort resolves it; omit DefaultEffort
+	// (or set one outside this list) to fall back to SupportedEfforts[0].
+	SupportedEfforts []string `toml:"supported_efforts"`
+	// DefaultEffort is the /effort level used when the user picks "auto" or
+	// has not set Effort. Ignored when SupportedEfforts is empty.
+	DefaultEffort string `toml:"default_effort"`
 	// NoProxy reaches this provider's base_url directly, never through the proxy.
 	// For China-only endpoints a foreign-exit proxy resets the TLS handshake (#2803).
 	NoProxy bool `toml:"no_proxy"`
@@ -720,6 +729,7 @@ func LoadForRoot(root string) (*Config, error) {
 	// the v2 config or .mcp.json already declared wins on a name collision.
 	cfg.mergeMCPJSON(loadLegacyMCP(legacyConfigPath()))
 	normalizeLegacyEffort(cfg)
+	normalizeEffortConfig(cfg)
 	backfillDeepSeekPro(cfg)
 	// First run (no config file anywhere): keep CodeGraph off until the user opts
 	// in. An existing config — even one without a [codegraph] section — keeps the
@@ -820,6 +830,8 @@ func LoadForEdit(path string) *Config {
 	if err := mergeFile(cfg, path); err != nil {
 		slog.Warn("config: load for edit failed, using defaults", "path", path, "err", err)
 	}
+	normalizeLegacyEffort(cfg)
+	normalizeEffortConfig(cfg)
 	return cfg
 }
 

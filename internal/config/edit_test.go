@@ -694,3 +694,159 @@ func TestSetNetworkRejectsIncompleteCustomProxy(t *testing.T) {
 		t.Fatal("custom proxy without server/port should be rejected")
 	}
 }
+
+func TestEffortCapabilityCustomSupportedEfforts(t *testing.T) {
+	e := &ProviderEntry{
+		Name:             "custom",
+		Kind:             "openai",
+		BaseURL:          "https://example.com",
+		SupportedEfforts: []string{"low", "medium", "high"},
+		DefaultEffort:    "high",
+	}
+	cap := EffortCapabilityForEntry(e)
+	if !cap.Supported {
+		t.Fatalf("expected supported, got %+v", cap)
+	}
+	wantLevels := []string{"auto", "low", "medium", "high"}
+	if len(cap.Levels) != len(wantLevels) {
+		t.Fatalf("levels = %v, want %v", cap.Levels, wantLevels)
+	}
+	for i, l := range wantLevels {
+		if cap.Levels[i] != l {
+			t.Errorf("levels[%d] = %q, want %q", i, cap.Levels[i], l)
+		}
+	}
+	if cap.Default != "high" {
+		t.Errorf("default = %q, want high", cap.Default)
+	}
+}
+
+func TestNormalizeEffortCustomSupportedEfforts(t *testing.T) {
+	e := &ProviderEntry{
+		Name:             "custom",
+		Kind:             "openai",
+		BaseURL:          "https://example.com",
+		SupportedEfforts: []string{"low", "medium", "high"},
+	}
+	for in, want := range map[string]string{"auto": "", "low": "low", "MEDIUM": "medium", "high": "high"} {
+		got, err := NormalizeEffort(e, in)
+		if err != nil || got != want {
+			t.Fatalf("NormalizeEffort(%q) = %q/%v, want %q/nil", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"max", "xhigh", "", "  "} {
+		if _, err := NormalizeEffort(e, bad); err == nil {
+			t.Errorf("NormalizeEffort(%q) should be rejected", bad)
+		}
+	}
+}
+
+func TestNormalizeEffortCustomDefaultEffort(t *testing.T) {
+	e := &ProviderEntry{
+		Name:             "custom",
+		Kind:             "openai",
+		BaseURL:          "https://example.com",
+		SupportedEfforts: []string{"low", "medium", "high"},
+		DefaultEffort:    "xhigh", // not in the list — must fall back to the first level
+	}
+	cap := EffortCapabilityForEntry(e)
+	if cap.Default != "low" {
+		t.Fatalf("default = %q, want low (first of supported_efforts)", cap.Default)
+	}
+	// Omitting DefaultEffort also falls back to the first level.
+	e2 := *e
+	e2.DefaultEffort = ""
+	if cap := EffortCapabilityForEntry(&e2); cap.Default != "low" {
+		t.Errorf("empty default = %q, want low", cap.Default)
+	}
+	// /effort auto still maps to "" regardless of DefaultEffort.
+	if got, err := NormalizeEffort(e, "auto"); err != nil || got != "" {
+		t.Fatalf("NormalizeEffort(auto) = %q/%v, want empty/nil", got, err)
+	}
+	e.Effort = "high"
+	if got := EffectiveEffort(e); got != "high" {
+		t.Fatalf("explicit effort should win over default_effort, got %q", got)
+	}
+}
+
+func TestNormalizeEffortCustomLevelsCaseInsensitive(t *testing.T) {
+	e := &ProviderEntry{
+		Name:             "custom",
+		Kind:             "openai",
+		BaseURL:          "https://example.com",
+		SupportedEfforts: []string{"Low", "MEDIUM", "medium", "auto", " "},
+		DefaultEffort:    "MEDIUM",
+	}
+	cap := EffortCapabilityForEntry(e)
+	wantLevels := []string{"auto", "low", "medium"}
+	if len(cap.Levels) != len(wantLevels) {
+		t.Fatalf("levels = %v, want %v", cap.Levels, wantLevels)
+	}
+	for i, want := range wantLevels {
+		if cap.Levels[i] != want {
+			t.Fatalf("levels[%d] = %q, want %q", i, cap.Levels[i], want)
+		}
+	}
+	if cap.Default != "medium" {
+		t.Fatalf("default = %q, want medium", cap.Default)
+	}
+	got, err := NormalizeEffort(e, "MEDIUM")
+	if err != nil || got != "medium" {
+		t.Fatalf("NormalizeEffort(MEDIUM) = %q/%v, want medium/nil", got, err)
+	}
+	if got := EffectiveEffort(e); got != "medium" {
+		t.Fatalf("EffectiveEffort = %q, want medium", got)
+	}
+}
+
+func TestUpsertProviderNormalizesCustomEffortFields(t *testing.T) {
+	c := &Config{}
+	if err := c.UpsertProvider(ProviderEntry{
+		Name:             "custom",
+		Kind:             "openai",
+		BaseURL:          "https://example.com",
+		Model:            "m",
+		Effort:           " HIGH ",
+		SupportedEfforts: []string{"Low", "MEDIUM", "medium", "auto"},
+		DefaultEffort:    " LOW ",
+	}); err != nil {
+		t.Fatalf("UpsertProvider: %v", err)
+	}
+	got, _ := c.Provider("custom")
+	if got.Effort != "high" || got.DefaultEffort != "low" {
+		t.Fatalf("effort/default = %q/%q, want high/low", got.Effort, got.DefaultEffort)
+	}
+	wantSupported := []string{"low", "medium"}
+	if len(got.SupportedEfforts) != len(wantSupported) {
+		t.Fatalf("supported_efforts = %v, want %v", got.SupportedEfforts, wantSupported)
+	}
+	for i, want := range wantSupported {
+		if got.SupportedEfforts[i] != want {
+			t.Fatalf("supported_efforts[%d] = %q, want %q", i, got.SupportedEfforts[i], want)
+		}
+	}
+}
+
+func TestEffortCapabilityEmptySupportedEffortsNotConfigurable(t *testing.T) {
+	// mimo-pro without SupportedEfforts: no built-in heuristic, /effort must reject.
+	e := &ProviderEntry{
+		Name:    "mimo-pro",
+		Kind:    "openai",
+		BaseURL: "https://token-plan-cn.xiaomimimo.com/v1",
+		Model:   "mimo-v2.5-pro",
+	}
+	if cap := EffortCapabilityForEntry(e); cap.Supported {
+		t.Fatalf("mimo-pro without SupportedEfforts should not be configurable, got %+v", cap)
+	}
+	if _, err := NormalizeEffort(e, "high"); err == nil {
+		t.Fatal("NormalizeEffort should reject level for unsupported provider")
+	}
+	// `supported_efforts = []` (empty slice) is treated like nil — the v2 design
+	// has no way to opt out of the built-in heuristic; users either configure
+	// levels or leave the field unset.
+	e2 := *e
+	e2.SupportedEfforts = []string{}
+	if cap := EffortCapabilityForEntry(&e2); cap.Supported {
+		t.Fatalf("empty supported_efforts should also fall through to the heuristic, got %+v", cap)
+	}
+}
