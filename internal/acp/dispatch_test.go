@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"reasonix/internal/diff"
 	"reasonix/internal/event"
+	"reasonix/internal/provider"
 )
 
 // fakeNotifier captures Notify calls and answers Request via an injectable hook,
@@ -176,6 +178,50 @@ func TestUpdateSinkDropsAndWarns(t *testing.T) {
 	}
 }
 
+func TestUpdateSinkMapsUsage(t *testing.T) {
+	fn := &fakeNotifier{}
+	sink := newUpdateSink(fn, "sess-1")
+
+	sink.Emit(event.Event{
+		Kind: event.Usage,
+		Usage: &provider.Usage{
+			PromptTokens:     100,
+			CompletionTokens: 25,
+			TotalTokens:      125,
+			CacheHitTokens:   90,
+			CacheMissTokens:  10,
+			ReasoningTokens:  5,
+		},
+		Pricing:     &provider.Pricing{Input: 1, Output: 2, CacheHit: 0.1, Currency: "¥"},
+		SessionHit:  190,
+		SessionMiss: 10,
+		CacheDiagnostics: &event.CacheDiagnostics{
+			PrefixHash:          "prefix",
+			PrefixChanged:       true,
+			PrefixChangeReasons: []string{"tools changed"},
+			SystemHash:          "system",
+			ToolsHash:           "tools",
+			LogRewriteVersion:   1,
+			ToolSchemaTokens:    42,
+			CacheMissTokens:     10,
+			CacheHitTokens:      90,
+		},
+	})
+
+	u := fn.updateMap(t, 0)
+	if u["sessionUpdate"] != "usage" {
+		t.Fatalf("update = %v, want usage", u["sessionUpdate"])
+	}
+	usage, _ := u["usage"].(map[string]any)
+	if usage["totalTokens"] != float64(125) || usage["sessionCacheHitTokens"] != float64(190) {
+		t.Fatalf("usage = %v", usage)
+	}
+	diag, _ := usage["cacheDiagnostics"].(map[string]any)
+	if diag["prefixHash"] != "prefix" || diag["prefixChanged"] != true {
+		t.Fatalf("cacheDiagnostics = %v", diag)
+	}
+}
+
 // approveCall records one approve(id, allow, session, persist) callback.
 type approveCall struct {
 	id      string
@@ -203,6 +249,9 @@ func TestUpdateSinkApprovalAllowAlways(t *testing.T) {
 		if p.ToolCall.ToolCallID != "gate-9" {
 			t.Errorf("toolCallId = %q, want gate-9", p.ToolCall.ToolCallID)
 		}
+		if p.ToolCall.Preview == nil || p.ToolCall.Preview.Path != "danger.txt" || p.ToolCall.Preview.Added != 1 {
+			t.Errorf("preview = %+v, want danger.txt +1", p.ToolCall.Preview)
+		}
 		var input map[string]any
 		if err := json.Unmarshal(p.ToolCall.RawInput, &input); err != nil {
 			t.Fatalf("rawInput: %v", err)
@@ -219,7 +268,13 @@ func TestUpdateSinkApprovalAllowAlways(t *testing.T) {
 	got := make(chan approveCall, 1)
 	sink.bindApprove(func(id string, allow, session, persist bool) { got <- approveCall{id, allow, session, persist} })
 
-	sink.Emit(event.Event{Kind: event.ApprovalRequest, Approval: event.Approval{ID: "9", Tool: "bash", Subject: "rm -rf /", Args: `{"command":"rm -rf /"}`}})
+	sink.Emit(event.Event{Kind: event.ApprovalRequest, Approval: event.Approval{
+		ID:      "9",
+		Tool:    "bash",
+		Subject: "rm -rf /",
+		Args:    `{"command":"rm -rf /"}`,
+		Preview: &diff.Change{Path: "danger.txt", Kind: diff.Modify, OldText: "old\n", NewText: "new\n", Added: 1, Removed: 1, Diff: "@@"},
+	}})
 
 	select {
 	case c := <-got:

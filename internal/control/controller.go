@@ -43,7 +43,7 @@ import (
 	"reasonix/internal/provider"
 	"reasonix/internal/sandbox"
 	"reasonix/internal/skill"
-	"reasonix/internal/tool"
+	toolpkg "reasonix/internal/tool"
 )
 
 // Controller drives one chat session. Construct with New; drive with the command
@@ -85,7 +85,7 @@ type Controller struct {
 	// session-scoped context a hot-added stdio server binds its subprocess to.
 	// Together they let AddMCPServer connect a server mid-session and have its tools
 	// available on the next turn (see AddMCPServer / RemoveMCPServer).
-	reg       *tool.Registry
+	reg       *toolpkg.Registry
 	pluginCtx context.Context
 
 	// Checkpoints (snapshot-based rewind). cp is the per-session store rebound when
@@ -177,7 +177,7 @@ type Options struct {
 	Jobs *jobs.Manager
 	// Registry is the executor's live tool set, and PluginCtx the session-scoped
 	// context; both are needed for hot-adding MCP servers via AddMCPServer.
-	Registry  *tool.Registry
+	Registry  *toolpkg.Registry
 	PluginCtx context.Context
 	// WorkspaceRoot is the project root checkpoint restores are confined to ("" =
 	// no confinement). Frontends pass the cwd they launched the session in.
@@ -2061,7 +2061,15 @@ func (c *Controller) requestApproval(ctx context.Context, tool, subject string, 
 	c.approvals[id] = reply
 	c.mu.Unlock()
 
-	c.sink.Emit(event.Event{Kind: event.ApprovalRequest, Approval: event.Approval{ID: id, Tool: tool, Subject: subject, Args: string(args)}})
+	approval := event.Approval{ID: id, Tool: tool, Subject: subject, Args: string(args)}
+	if c.reg != nil {
+		if t, ok := c.reg.Get(tool); ok {
+			if ch, ok := toolpkg.PreviewChange(t, args); ok {
+				approval.Preview = &ch
+			}
+		}
+	}
+	c.sink.Emit(event.Event{Kind: event.ApprovalRequest, Approval: approval})
 	// The agent now needs the user's attention; a Notification hook can ping an
 	// external channel (desktop notice, phone) while the run blocks on the reply.
 	if subject != "" {

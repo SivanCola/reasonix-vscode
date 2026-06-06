@@ -236,6 +236,37 @@ type toolContent struct {
 	Content ContentBlock `json:"content"`
 }
 
+type usageUpdate struct {
+	SessionUpdate string          `json:"sessionUpdate"`
+	Usage         UsageUpdateData `json:"usage"`
+}
+
+type UsageUpdateData struct {
+	PromptTokens           int                     `json:"promptTokens"`
+	CompletionTokens       int                     `json:"completionTokens"`
+	TotalTokens            int                     `json:"totalTokens"`
+	CacheHitTokens         int                     `json:"cacheHitTokens"`
+	CacheMissTokens        int                     `json:"cacheMissTokens"`
+	ReasoningTokens        int                     `json:"reasoningTokens,omitempty"`
+	SessionCacheHitTokens  int                     `json:"sessionCacheHitTokens"`
+	SessionCacheMissTokens int                     `json:"sessionCacheMissTokens"`
+	Cost                   float64                 `json:"cost,omitempty"`
+	Currency               string                  `json:"currency,omitempty"`
+	CacheDiagnostics       *CacheDiagnosticsUpdate `json:"cacheDiagnostics,omitempty"`
+}
+
+type CacheDiagnosticsUpdate struct {
+	PrefixHash          string   `json:"prefixHash"`
+	PrefixChanged       bool     `json:"prefixChanged"`
+	PrefixChangeReasons []string `json:"prefixChangeReasons,omitempty"`
+	SystemHash          string   `json:"systemHash"`
+	ToolsHash           string   `json:"toolsHash"`
+	LogRewriteVersion   int      `json:"logRewriteVersion"`
+	ToolSchemaTokens    int      `json:"toolSchemaTokens"`
+	CacheMissTokens     int      `json:"cacheMissTokens"`
+	CacheHitTokens      int      `json:"cacheHitTokens"`
+}
+
 // --- session/cancel (client → agent notification) ---
 
 // SessionCancelParams cancels an in-progress turn.
@@ -277,6 +308,21 @@ type PermissionToolCall struct {
 	Kind       string          `json:"kind,omitempty"`
 	Status     string          `json:"status,omitempty"`
 	RawInput   json.RawMessage `json:"rawInput,omitempty"`
+	Preview    *ChangePreview  `json:"preview,omitempty"`
+}
+
+// ChangePreview is a host-renderable unified diff preview for a pending writer
+// tool. It is optional and additive, so older clients that only inspect rawInput
+// remain compatible.
+type ChangePreview struct {
+	Path    string `json:"path"`
+	Kind    string `json:"kind"`
+	OldText string `json:"oldText,omitempty"`
+	NewText string `json:"newText,omitempty"`
+	Added   int    `json:"added"`
+	Removed int    `json:"removed"`
+	Diff    string `json:"diff,omitempty"`
+	Binary  bool   `json:"binary,omitempty"`
 }
 
 // PermissionRequestResult is the client's reply to a permission request.
@@ -288,4 +334,117 @@ type PermissionRequestResult struct {
 type PermissionOutcome struct {
 	Outcome  string `json:"outcome"`
 	OptionID string `json:"optionId,omitempty"`
+}
+
+// --- extension methods (additive Reasonix ACP extensions) ---
+
+type SessionStatusParams struct {
+	SessionID string `json:"sessionId"`
+}
+
+type SessionStatusResult struct {
+	Label           string           `json:"label"`
+	Running         bool             `json:"running"`
+	Used            int              `json:"used"`
+	Window          int              `json:"window"`
+	CacheHit        int              `json:"cacheHit"`
+	CacheMiss       int              `json:"cacheMiss"`
+	LastUsage       *UsageUpdateData `json:"lastUsage,omitempty"`
+	ConnectedMCP    []string         `json:"connectedMcp,omitempty"`
+	ConfiguredMCP   []string         `json:"configuredMcp,omitempty"`
+	DisconnectedMCP []string         `json:"disconnectedMcp,omitempty"`
+}
+
+type ModelListResult struct {
+	DefaultModel string      `json:"defaultModel,omitempty"`
+	CurrentModel string      `json:"currentModel,omitempty"`
+	Models       []ModelInfo `json:"models"`
+}
+
+type ModelInfo struct {
+	Ref             string   `json:"ref"`
+	Provider        string   `json:"provider"`
+	Model           string   `json:"model"`
+	Current         bool     `json:"current,omitempty"`
+	Configured      bool     `json:"configured"`
+	Effort          string   `json:"effort,omitempty"`
+	EffortSupported bool     `json:"effortSupported"`
+	EffortLevels    []string `json:"effortLevels,omitempty"`
+	DefaultEffort   string   `json:"defaultEffort,omitempty"`
+}
+
+type EffortSetParams struct {
+	ModelRef string `json:"modelRef,omitempty"`
+	Level    string `json:"level"`
+}
+
+type EffortSetResult struct {
+	ModelRef string `json:"modelRef"`
+	Level    string `json:"level"`
+}
+
+type SurfaceListParams struct {
+	SessionID string `json:"sessionId"`
+}
+
+type SurfaceListResult struct {
+	Commands         []SlashCommandInfo    `json:"commands"`
+	Skills           []SkillInfo           `json:"skills"`
+	DisabledSkills   []SkillInfo           `json:"disabledSkills,omitempty"`
+	MCPServers       []MCPServerInfo       `json:"mcpServers,omitempty"`
+	MCPPrompts       []MCPPromptInfo       `json:"mcpPrompts,omitempty"`
+	MCPResources     []MCPResourceInfo     `json:"mcpResources,omitempty"`
+	SlashCompletions []SlashCompletionInfo `json:"slashCompletions,omitempty"`
+}
+
+type SlashCommandInfo struct {
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	ArgumentHint string `json:"argumentHint,omitempty"`
+	Source       string `json:"source,omitempty"`
+}
+
+type SkillInfo struct {
+	Name        string `json:"name"`
+	Scope       string `json:"scope"`
+	Subagent    bool   `json:"subagent"`
+	Description string `json:"description,omitempty"`
+}
+
+type MCPServerInfo struct {
+	Name      string        `json:"name"`
+	Transport string        `json:"transport,omitempty"`
+	Tools     int           `json:"tools,omitempty"`
+	Prompts   int           `json:"prompts,omitempty"`
+	Resources int           `json:"resources,omitempty"`
+	Status    string        `json:"status"`
+	Error     string        `json:"error,omitempty"`
+	ToolList  []MCPToolInfo `json:"toolList,omitempty"`
+}
+
+type MCPToolInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type MCPPromptInfo struct {
+	Name        string   `json:"name"`
+	Server      string   `json:"server"`
+	Description string   `json:"description,omitempty"`
+	Args        []string `json:"args,omitempty"`
+}
+
+type MCPResourceInfo struct {
+	URI         string `json:"uri"`
+	Server      string `json:"server"`
+	Name        string `json:"name,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type SlashCompletionInfo struct {
+	Label   string `json:"label"`
+	Insert  string `json:"insert"`
+	Hint    string `json:"hint,omitempty"`
+	Descend bool   `json:"descend,omitempty"`
 }

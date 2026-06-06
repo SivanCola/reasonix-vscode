@@ -11,6 +11,10 @@ export function configuredSelectionMode(): IncludeSelectionMode {
 }
 
 export function buildEditorContext(mode = configuredSelectionMode()): string | undefined {
+  return buildEditorContextInfo(mode)?.text;
+}
+
+export function buildEditorContextInfo(mode = configuredSelectionMode()): { text: string; summary: string } | undefined {
   if (mode === "off") {
     return undefined;
   }
@@ -28,30 +32,32 @@ export function buildEditorContext(mode = configuredSelectionMode()): string | u
   const selection = editor.selection;
   const hasSelection = !selection.isEmpty;
   const range = hasSelection ? selection : cursorWindow(doc, selection.active.line);
-  const text = doc.getText(range);
-  if (text.trim() === "") {
+  const selectedText = doc.getText(range);
+  if (selectedText.trim() === "") {
     return undefined;
   }
 
   const label = hasSelection ? "Selection" : "Cursor window";
-  return [
+  const summary = `${filePath} lines ${range.start.line + 1}-${range.end.line + 1}`;
+  const contextText = [
     "<vscode_context>",
     `File: ${filePath}`,
     `Language: ${doc.languageId}`,
     `${label}: lines ${range.start.line + 1}-${range.end.line + 1}`,
     "```" + doc.languageId,
-    text,
+    selectedText,
     "```",
     "</vscode_context>",
   ].join("\n");
+  return { text: contextText, summary };
 }
 
 export function appendEditorContext(prompt: string, mode = configuredSelectionMode()): string {
-  const ctx = buildEditorContext(mode);
+  const ctx = buildEditorContextInfo(mode);
   if (!ctx) {
     return prompt;
   }
-  return `${prompt.trimEnd()}\n\n${ctx}`;
+  return `${prompt.trimEnd()}\n\n${ctx.text}`;
 }
 
 function cursorWindow(doc: vscode.TextDocument, line: number): vscode.Range {

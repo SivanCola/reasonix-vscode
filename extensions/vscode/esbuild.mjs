@@ -27,11 +27,19 @@ const builds = [
   },
   {
     ...common,
-    entryPoints: ["test/jsonRpc.test.ts", "test/chatState.test.ts", "test/webviewProtocol.test.ts"],
+    entryPoints: ["test/jsonRpc.test.ts", "test/chatState.test.ts", "test/webviewProtocol.test.ts", "test/sanitize.test.ts"],
     outdir: "dist/test",
     platform: "node",
     format: "cjs",
     external: ["node:test", "node:assert/strict"],
+  },
+  {
+    ...common,
+    entryPoints: ["test/vscode/runTest.ts", "test/vscode/suite/index.ts"],
+    outdir: "dist/test/vscode",
+    platform: "node",
+    format: "cjs",
+    external: ["vscode", "@vscode/test-electron"],
   },
 ];
 

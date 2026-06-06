@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 
 	"reasonix/internal/acp"
 	"reasonix/internal/agent"
@@ -79,6 +80,7 @@ func acpCommand(args []string, version string) int {
 // sessions have separate path roots), and the client's per-session MCP servers
 // are connected alongside the config's own plugins.
 type acpFactory struct {
+	mu    sync.Mutex
 	cfg   *config.Config
 	model string
 }
@@ -86,10 +88,13 @@ type acpFactory struct {
 // NewSession assembles the per-session controller. Resources (MCP subprocesses)
 // are released via the controller's Cleanup, run on ctrl.Close().
 func (f *acpFactory) NewSession(ctx context.Context, p acp.SessionParams) (*control.Controller, error) {
+	f.mu.Lock()
 	cfg := f.cfg
-	entry, ok := cfg.ResolveModel(f.model)
+	modelRef := f.model
+	f.mu.Unlock()
+	entry, ok := cfg.ResolveModel(modelRef)
 	if !ok {
-		return nil, fmt.Errorf("unknown model %q", f.model)
+		return nil, fmt.Errorf("unknown model %q", modelRef)
 	}
 	proxySpec := cfg.NetworkProxySpec()
 	execProv, err := boot.NewProviderWithProxy(entry, proxySpec)
@@ -206,6 +211,89 @@ func (f *acpFactory) NewSession(ctx context.Context, p acp.SessionParams) (*cont
 		Commands:     cmds,
 		Cleanup:      cleanup,
 	}), nil
+}
+
+func (f *acpFactory) ListModels() (acp.ModelListResult, error) {
+	f.mu.Lock()
+	cfg := f.cfg
+	current := f.model
+	f.mu.Unlock()
+	if current == "" {
+		current = cfg.DefaultModel
+	}
+	out := acp.ModelListResult{DefaultModel: cfg.DefaultModel, CurrentModel: current}
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
+		for _, model := range p.ModelList() {
+			ref := p.Name + "/" + model
+			resolved, _ := cfg.ResolveModel(ref)
+			cap := config.EffortCapabilityForEntry(resolved)
+			info := acp.ModelInfo{
+				Ref:             ref,
+				Provider:        p.Name,
+				Model:           model,
+				Current:         ref == current || p.Name == current || model == current,
+				Configured:      p.Configured(),
+				Effort:          config.EffortDisplay(resolved),
+				EffortSupported: cap.Supported,
+				EffortLevels:    append([]string(nil), cap.Levels...),
+				DefaultEffort:   cap.Default,
+			}
+			out.Models = append(out.Models, info)
+		}
+	}
+	return out, nil
+}
+
+func (f *acpFactory) SetEffort(p acp.EffortSetParams) (acp.EffortSetResult, error) {
+	f.mu.Lock()
+	cfg := f.cfg
+	modelRef := strings.TrimSpace(p.ModelRef)
+	if modelRef == "" {
+		modelRef = f.model
+	}
+	if modelRef == "" {
+		modelRef = cfg.DefaultModel
+	}
+	entry, ok := cfg.ResolveModel(modelRef)
+	f.mu.Unlock()
+	if !ok {
+		return acp.EffortSetResult{}, fmt.Errorf("unknown model %q", modelRef)
+	}
+	if !config.EffortCapabilityForEntry(entry).Supported {
+		return acp.EffortSetResult{}, fmt.Errorf("effort is not configurable for %s", entry.Name)
+	}
+	effort, err := config.NormalizeEffort(entry, p.Level)
+	if err != nil {
+		return acp.EffortSetResult{}, err
+	}
+	editPath := config.UserConfigPath()
+	if editPath == "" {
+		return acp.EffortSetResult{}, fmt.Errorf("no config file found")
+	}
+	edit := config.LoadForEdit(editPath)
+	if _, ok := edit.Provider(entry.Name); !ok {
+		if err := edit.UpsertProvider(*entry); err != nil {
+			return acp.EffortSetResult{}, err
+		}
+	}
+	if entry.Kind == "anthropic" && effort != "" && entry.Thinking == "" {
+		if err := edit.SetProviderThinking(entry.Name, "adaptive"); err != nil {
+			return acp.EffortSetResult{}, err
+		}
+	}
+	if err := edit.SetProviderEffort(entry.Name, effort); err != nil {
+		return acp.EffortSetResult{}, err
+	}
+	if err := edit.SaveTo(editPath); err != nil {
+		return acp.EffortSetResult{}, err
+	}
+	f.mu.Lock()
+	if fresh, err := config.Load(); err == nil {
+		f.cfg = fresh
+	}
+	f.mu.Unlock()
+	return acp.EffortSetResult{ModelRef: entry.Name + "/" + entry.Model, Level: config.EffortDisplay(&config.ProviderEntry{Effort: effort})}, nil
 }
 
 func acpBuiltinTools(cfg *config.Config, cwd string, writeRoots []string) []tool.Tool {

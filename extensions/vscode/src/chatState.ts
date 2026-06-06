@@ -1,4 +1,4 @@
-import type { SessionUpdate } from "./acpTypes";
+import type { ChangePreview, PermissionRequestParams, SessionUpdate, UsageData } from "./acpTypes";
 
 export type ChatItem =
   | {
@@ -13,7 +13,22 @@ export type ChatItem =
       kind: string;
       status: string;
       rawInput?: unknown;
+      preview?: ChangePreview;
       content?: string;
+    }
+  | {
+      type: "usage";
+      usage: UsageData;
+    }
+  | {
+      type: "approval";
+      id: string;
+      title: string;
+      kind: string;
+      rawInput?: unknown;
+      preview?: ChangePreview;
+      options: Array<{ optionId: string; name: string; kind: string }>;
+      status: "pending" | "selected" | "cancelled";
     };
 
 export function appendUserMessage(items: ChatItem[], text: string): void {
@@ -22,6 +37,26 @@ export function appendUserMessage(items: ChatItem[], text: string): void {
 
 export function appendNotice(items: ChatItem[], text: string): void {
   items.push({ type: "message", role: "notice", text });
+}
+
+export function appendApproval(items: ChatItem[], params: PermissionRequestParams): void {
+  items.push({
+    type: "approval",
+    id: params.toolCall.toolCallId,
+    title: params.toolCall.title ?? params.toolCall.toolCallId,
+    kind: params.toolCall.kind ?? "other",
+    rawInput: params.toolCall.rawInput,
+    preview: params.toolCall.preview,
+    options: params.options,
+    status: "pending",
+  });
+}
+
+export function resolveApproval(items: ChatItem[], id: string, selected: boolean): void {
+  const item = items.find((candidate): candidate is Extract<ChatItem, { type: "approval" }> => candidate.type === "approval" && candidate.id === id);
+  if (item) {
+    item.status = selected ? "selected" : "cancelled";
+  }
 }
 
 export function applySessionUpdate(items: ChatItem[], update: SessionUpdate): void {
@@ -42,16 +77,23 @@ export function applySessionUpdate(items: ChatItem[], update: SessionUpdate): vo
         existing.kind = update.kind ?? existing.kind;
         existing.status = update.status ?? existing.status;
         existing.rawInput = update.rawInput ?? existing.rawInput;
+        if (update.preview !== undefined) {
+          existing.preview = update.preview;
+        }
         return;
       }
-      items.push({
+      const toolItem: Extract<ChatItem, { type: "tool" }> = {
         type: "tool",
         id: update.toolCallId,
         title: update.title ?? update.toolCallId,
         kind: update.kind ?? "other",
         status: update.status ?? "pending",
         rawInput: update.rawInput,
-      });
+      };
+      if (update.preview !== undefined) {
+        toolItem.preview = update.preview;
+      }
+      items.push(toolItem);
       return;
     }
     case "tool_call_update": {
@@ -70,6 +112,15 @@ export function applySessionUpdate(items: ChatItem[], update: SessionUpdate): vo
         status: update.status ?? "completed",
         content: text,
       });
+      return;
+    }
+    case "usage": {
+      const last = items.at(-1);
+      if (last?.type === "usage") {
+        last.usage = update.usage;
+        return;
+      }
+      items.push({ type: "usage", usage: update.usage });
       return;
     }
     default:

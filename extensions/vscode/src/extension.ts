@@ -2,20 +2,42 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { AcpClient } from "./acpClient";
-import type { PermissionRequestParams, PermissionRequestResult, SessionUpdateParams } from "./acpTypes";
-import { appendNotice, appendUserMessage, applySessionUpdate, type ChatItem } from "./chatState";
-import { appendEditorContext, buildEditorContext } from "./editorContext";
+import type {
+  ModelInfo,
+  PermissionRequestParams,
+  PermissionRequestResult,
+  SessionUpdateParams,
+  SurfaceListResult,
+  UsageData,
+} from "./acpTypes";
+import { appendApproval, appendNotice, appendUserMessage, applySessionUpdate, resolveApproval as resolveApprovalItem, type ChatItem } from "./chatState";
+import { buildEditorContext, buildEditorContextInfo } from "./editorContext";
 import { DiffPreviewProvider } from "./preview";
+import { redactLocalPaths } from "./sanitize";
 import { parseWebviewMessage } from "./webviewProtocol";
 
 const execFileAsync = promisify(execFile);
 const viewId = "reasonix.chat";
 
-type ChatSnapshot = {
+type WorkspaceChatState = {
   items: ChatItem[];
   running: boolean;
   disconnected: boolean;
   status: string;
+  usage?: UsageData;
+  surfaces?: SurfaceListResult;
+  models?: ModelInfo[];
+};
+
+type ChatSnapshot = WorkspaceChatState & {
+  workspace: string;
+  contextMode: string;
+};
+
+type PendingApproval = {
+  stateKey: string;
+  resolve: (value: PermissionRequestResult) => void;
+  options: PermissionRequestParams["options"];
 };
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -23,9 +45,14 @@ export function activate(context: vscode.ExtensionContext): void {
   const preview = new DiffPreviewProvider();
   preview.register(context);
 
-  const provider = new ReasonixChatProvider(context, output, preview);
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusBar.command = "reasonix.openChat";
+  const provider = new ReasonixChatProvider(context, output, preview, statusBar);
+  statusBar.show();
+
   context.subscriptions.push(
     output,
+    statusBar,
     vscode.window.registerWebviewViewProvider(viewId, provider, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.commands.registerCommand("reasonix.openChat", async () => {
       await vscode.commands.executeCommand("workbench.view.extension.reasonix");
@@ -36,23 +63,24 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("reasonix.cancelTurn", () => provider.cancelTurn()),
     vscode.commands.registerCommand("reasonix.pickModel", () => provider.pickModel()),
     vscode.commands.registerCommand("reasonix.showOutput", () => output.show()),
+    vscode.window.onDidChangeActiveTextEditor(() => provider.refreshActiveWorkspace()),
   );
+  provider.refreshActiveWorkspace();
 }
 
 export function deactivate(): void {}
 
 class ReasonixChatProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
-  private client?: AcpClient;
-  private items: ChatItem[] = [];
-  private running = false;
-  private disconnected = true;
-  private status = "Idle";
+  private readonly clients = new Map<string, AcpClient>();
+  private readonly states = new Map<string, WorkspaceChatState>();
+  private readonly pendingApprovals = new Map<string, PendingApproval>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly output: vscode.OutputChannel,
     private readonly preview: DiffPreviewProvider,
+    private readonly statusBar: vscode.StatusBarItem,
   ) {}
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -70,20 +98,33 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  refreshActiveWorkspace(): void {
+    this.postSnapshot();
+  }
+
   async newSession(): Promise<void> {
-    if (this.running) {
+    const folder = this.currentWorkspaceFolder();
+    if (!folder) {
+      void vscode.window.showErrorMessage("Open a workspace folder before starting Reasonix.");
+      return;
+    }
+    const key = workspaceKey(folder);
+    const state = this.stateFor(folder);
+    if (state.running) {
       void vscode.window.showWarningMessage("Reasonix is running. Cancel the current turn before starting a new session.");
       return;
     }
-    this.client?.dispose();
-    this.client = undefined;
-    this.items = [];
-    this.running = false;
-    this.disconnected = true;
-    this.status = "New session";
-    await this.context.workspaceState.update(this.sessionStorageKey(), undefined);
+    this.clients.get(key)?.dispose();
+    this.clients.delete(key);
+    state.items = [];
+    state.running = false;
+    state.disconnected = true;
+    state.status = "New session";
+    state.usage = undefined;
+    state.surfaces = undefined;
+    await this.context.workspaceState.update(this.sessionStorageKey(folder), undefined);
     this.postSnapshot();
-    await this.ensureClient();
+    await this.ensureClient(folder);
   }
 
   async sendSelection(): Promise<void> {
@@ -97,39 +138,74 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
   }
 
   cancelTurn(): void {
-    this.client?.cancel();
-    this.running = false;
-    this.status = "Cancelling";
+    const folder = this.currentWorkspaceFolder();
+    if (!folder) {
+      return;
+    }
+    const state = this.stateFor(folder);
+    this.clients.get(workspaceKey(folder))?.cancel();
+    state.running = false;
+    state.status = "Cancelling";
     this.postSnapshot();
   }
 
   async pickModel(): Promise<void> {
-    if (this.running) {
+    const folder = this.currentWorkspaceFolder();
+    if (!folder) {
+      void vscode.window.showErrorMessage("Open a workspace folder before switching model.");
+      return;
+    }
+    const state = this.stateFor(folder);
+    if (state.running) {
       void vscode.window.showWarningMessage("Reasonix is running. Cancel the current turn before switching model.");
       return;
     }
-    const config = vscode.workspace.getConfiguration("reasonix");
-    const current = config.get<string>("model", "");
-    const model = await vscode.window.showInputBox({
-      title: "Reasonix model",
-      prompt: "Provider/model reference passed to reasonix acp --model. Leave empty to use Reasonix config default.",
-      value: current,
-    });
-    if (model === undefined) {
+    const client = await this.ensureClient(folder);
+    if (!client) {
       return;
     }
-    await config.update("model", model.trim(), vscode.ConfigurationTarget.Workspace);
-    this.client?.dispose();
-    this.client = undefined;
-    this.disconnected = true;
-    this.status = model.trim() === "" ? "Using config default model" : `Model: ${model.trim()}`;
+    const models = await client.listModels();
+    state.models = models.models;
+    const picked = await vscode.window.showQuickPick(
+      models.models.map((model) => ({
+        label: model.ref,
+        description: model.current ? "current" : model.configured ? model.effort ? `effort ${model.effort}` : "" : "missing key",
+        detail: model.effortSupported ? `Effort: ${(model.effortLevels ?? []).join(", ")}` : "Effort is not configurable",
+        model,
+      })),
+      { title: "Reasonix model" },
+    );
+    if (!picked) {
+      return;
+    }
+    const config = vscode.workspace.getConfiguration("reasonix");
+    await config.update("model", picked.model.ref, vscode.ConfigurationTarget.Workspace);
+
+    if (picked.model.effortSupported && picked.model.effortLevels && picked.model.effortLevels.length > 0) {
+      const effort = await vscode.window.showQuickPick(picked.model.effortLevels, {
+        title: `Reasonix effort for ${picked.model.ref}`,
+        placeHolder: picked.model.effort ?? picked.model.defaultEffort ?? "auto",
+      });
+      if (effort) {
+        await client.setEffort(picked.model.ref, effort);
+      }
+    }
+
+    this.clients.get(workspaceKey(folder))?.dispose();
+    this.clients.delete(workspaceKey(folder));
+    state.items = [];
+    state.usage = undefined;
+    state.surfaces = undefined;
+    state.disconnected = true;
+    state.status = `Model: ${picked.model.ref}`;
+    await this.context.workspaceState.update(this.sessionStorageKey(folder), undefined);
     this.postSnapshot();
   }
 
   private async handleWebviewMessage(raw: unknown): Promise<void> {
     const message = parseWebviewMessage(raw);
     if (!message) {
-      this.output.appendLine(`Ignored invalid webview message: ${JSON.stringify(raw)}`);
+      this.appendOutput(`Ignored invalid webview message: ${JSON.stringify(raw)}`);
       return;
     }
     switch (message.command) {
@@ -149,10 +225,11 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
         }
         return;
       }
+      case "approvalDecision":
+        this.resolveApproval(message.id, message.optionId);
+        return;
       case "stateSnapshot":
         this.postSnapshot();
-        return;
-      case "approvalDecision":
         return;
       default:
         assertNever(message);
@@ -160,141 +237,227 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
   }
 
   private async sendPrompt(text: string, appendContext: boolean): Promise<void> {
-    const trimmed = text.trim();
-    if (trimmed === "" || this.running) {
+    const folder = this.currentWorkspaceFolder();
+    if (!folder) {
+      void vscode.window.showErrorMessage("Open a workspace folder before starting Reasonix.");
       return;
     }
-    const client = await this.ensureClient();
+    const state = this.stateFor(folder);
+    const trimmed = text.trim();
+    if (trimmed === "" || state.running) {
+      return;
+    }
+    const client = await this.ensureClient(folder);
     if (!client) {
       return;
     }
 
-    const prompt = appendContext ? appendEditorContext(trimmed) : trimmed;
-    appendUserMessage(this.items, prompt);
-    this.running = true;
-    this.status = "Running";
+    const prompt = appendContext ? await this.promptWithConfirmedContext(trimmed) : trimmed;
+    if (!prompt) {
+      return;
+    }
+    appendUserMessage(state.items, prompt);
+    state.running = true;
+    state.status = "Running";
     this.postSnapshot();
 
     try {
       const result = await client.sendPrompt(prompt);
       if (result.stopReason === "cancelled") {
-        appendNotice(this.items, "Turn cancelled.");
+        appendNotice(state.items, "Turn cancelled.");
       } else if (result.stopReason === "error") {
-        appendNotice(this.items, "Turn ended with an error. Check the Reasonix output channel.");
+        appendNotice(state.items, "Turn ended with an error. Check the Reasonix output channel.");
       }
     } catch (err) {
-      appendNotice(this.items, `Reasonix error: ${errorMessage(err)}`);
-      this.output.appendLine(`Reasonix prompt failed: ${errorMessage(err)}`);
+      appendNotice(state.items, `Reasonix error: ${errorMessage(err)}`);
+      this.appendOutput(`Reasonix prompt failed: ${errorMessage(err)}`, folder);
     } finally {
-      this.running = false;
-      this.status = this.disconnected ? "Disconnected" : "Idle";
+      state.running = false;
+      state.status = state.disconnected ? "Disconnected" : "Idle";
+      await this.refreshStatus(client, folder);
       this.postSnapshot();
     }
   }
 
-  private async ensureClient(): Promise<AcpClient | undefined> {
-    if (this.client?.connected) {
-      return this.client;
+  private async promptWithConfirmedContext(prompt: string): Promise<string | undefined> {
+    const info = buildEditorContextInfo();
+    if (!info) {
+      return prompt;
     }
-    const workspaceFolder = this.currentWorkspaceFolder();
-    if (!workspaceFolder) {
-      void vscode.window.showErrorMessage("Open a workspace folder before starting Reasonix.");
+    const action = await vscode.window.showInformationMessage(
+      `Reasonix will include VS Code context from ${info.summary}.`,
+      { modal: true, detail: truncate(info.text, 4000) },
+      "Send with Context",
+      "Send without Context",
+      "Cancel",
+    );
+    if (action === "Cancel" || action === undefined) {
       return undefined;
+    }
+    return action === "Send without Context" ? prompt : `${prompt.trimEnd()}\n\n${info.text}`;
+  }
+
+  private async ensureClient(folder = this.currentWorkspaceFolder()): Promise<AcpClient | undefined> {
+    if (!folder) {
+      return undefined;
+    }
+    const key = workspaceKey(folder);
+    const existing = this.clients.get(key);
+    if (existing?.connected) {
+      return existing;
     }
     const binaryPath = await resolveReasonixBinary();
     if (!binaryPath) {
       return undefined;
     }
+    const state = this.stateFor(folder);
     const config = vscode.workspace.getConfiguration("reasonix");
     const model = config.get<string>("model", "");
     const trace = config.get<boolean>("trace", false);
-    const previousSessionId = this.context.workspaceState.get<string>(this.sessionStorageKey(workspaceFolder));
+    const previousSessionId = this.context.workspaceState.get<string>(this.sessionStorageKey(folder));
 
-    this.disconnected = false;
-    this.status = "Starting";
+    state.disconnected = false;
+    state.status = "Starting";
     this.postSnapshot();
     const client = new AcpClient({
       binaryPath,
       model,
-      cwd: workspaceFolder.uri.fsPath,
+      cwd: folder.uri.fsPath,
       previousSessionId,
       output: this.output,
       trace,
-      onUpdate: (params) => this.handleSessionUpdate(params),
-      onPermissionRequest: (params) => this.handlePermissionRequest(params),
+      onUpdate: (params) => this.handleSessionUpdate(folder, params),
+      onPermissionRequest: (params) => this.handlePermissionRequest(folder, params),
       onDisconnect: (reason) => {
-        this.output.appendLine(`Reasonix ACP disconnected: ${reason}`);
-        this.client = undefined;
-        this.disconnected = true;
-        this.running = false;
-        this.status = "Disconnected";
+        this.appendOutput(`Reasonix ACP disconnected: ${reason}`, folder);
+        this.clients.delete(key);
+        state.disconnected = true;
+        state.running = false;
+        state.status = "Disconnected";
         this.postSnapshot();
       },
       onSessionId: (sessionId) => {
-        void this.context.workspaceState.update(this.sessionStorageKey(workspaceFolder), sessionId);
+        void this.context.workspaceState.update(this.sessionStorageKey(folder), sessionId);
       },
     });
-    this.client = client;
+    this.clients.set(key, client);
     try {
       await client.start();
-      this.disconnected = false;
-      this.status = "Idle";
+      state.disconnected = false;
+      state.status = "Idle";
+      await this.refreshStatus(client, folder);
+      await this.refreshSurfaces(client, folder);
       this.postSnapshot();
       return client;
     } catch (err) {
       client.dispose();
-      this.client = undefined;
-      this.disconnected = true;
-      this.status = "Start failed";
-      appendNotice(this.items, `Could not start Reasonix: ${errorMessage(err)}`);
-      this.output.appendLine(`Reasonix start failed: ${errorMessage(err)}`);
+      this.clients.delete(key);
+      state.disconnected = true;
+      state.status = "Start failed";
+      appendNotice(state.items, `Could not start Reasonix: ${errorMessage(err)}`);
+      this.appendOutput(`Reasonix start failed: ${errorMessage(err)}`, folder);
       this.postSnapshot();
       return undefined;
     }
   }
 
-  private handleSessionUpdate(params: SessionUpdateParams): void {
-    applySessionUpdate(this.items, params.update);
+  private handleSessionUpdate(folder: vscode.WorkspaceFolder, params: SessionUpdateParams): void {
+    const state = this.stateFor(folder);
+    applySessionUpdate(state.items, params.update);
+    if (params.update.sessionUpdate === "usage") {
+      state.usage = params.update.usage;
+      this.updateStatusBar(folder);
+    }
     this.postSnapshot();
   }
 
-  private async handlePermissionRequest(params: PermissionRequestParams): Promise<PermissionRequestResult> {
-    const workspaceFolder = this.currentWorkspaceFolder();
+  private async handlePermissionRequest(folder: vscode.WorkspaceFolder, params: PermissionRequestParams): Promise<PermissionRequestResult> {
+    const state = this.stateFor(folder);
+    appendApproval(state.items, params);
+    this.postSnapshot();
     try {
-      await this.preview.previewPermission(params, workspaceFolder);
+      await this.preview.previewPermission(params, folder);
     } catch (err) {
-      this.output.appendLine(`Reasonix diff preview failed: ${errorMessage(err)}`);
+      this.appendOutput(`Reasonix diff preview failed: ${errorMessage(err)}`, folder);
     }
 
-    const title = params.toolCall.title ?? "tool call";
-    const detail = permissionDetail(params);
-    const allow = "Allow";
-    const allowSession = "Allow Session";
-    const allowPersistent = "Always Allow";
-    const reject = "Reject";
+    if (!this.view) {
+      const result = await this.modalPermission(params);
+      resolveApprovalItem(state.items, params.toolCall.toolCallId, result.outcome.outcome === "selected");
+      this.postSnapshot();
+      return result;
+    }
+    return await new Promise<PermissionRequestResult>((resolve) => {
+      this.pendingApprovals.set(params.toolCall.toolCallId, { stateKey: workspaceKey(folder), resolve, options: params.options });
+    });
+  }
+
+  private async modalPermission(params: PermissionRequestParams): Promise<PermissionRequestResult> {
+    const choices = [
+      { title: "Allow Once", kind: "allow_once" },
+      { title: "Allow Session", kind: "allow_always" },
+      { title: "Always Allow", kind: "allow_persistent" },
+      { title: "Reject", kind: "cancelled" },
+    ];
     const picked = await vscode.window.showWarningMessage(
-      `Reasonix wants to run ${title}`,
-      { modal: true, detail },
-      allow,
-      allowSession,
-      allowPersistent,
-      reject,
+      `Reasonix wants to run ${params.toolCall.title ?? "a tool"}`,
+      { modal: true, detail: permissionDetail(params) },
+      ...choices.map((choice) => choice.title),
     );
-    if (!picked || picked === reject) {
+    const choice = choices.find((candidate) => candidate.title === picked);
+    if (!choice || choice.kind === "cancelled") {
       return { outcome: { outcome: "cancelled" } };
     }
-    const kind = picked === allow ? "allow_once" : picked === allowSession ? "allow_always" : "allow_persistent";
-    const option = params.options.find((candidate) => candidate.kind === kind) ?? params.options.find((candidate) => candidate.optionId === kind);
+    const option = params.options.find((candidate) => candidate.kind === choice.kind) ?? params.options.find((candidate) => candidate.optionId === choice.kind);
     return option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } };
   }
 
+  private resolveApproval(id: string, optionId: string): void {
+    const pending = this.pendingApprovals.get(id);
+    if (!pending) {
+      return;
+    }
+    this.pendingApprovals.delete(id);
+    const state = this.states.get(pending.stateKey);
+    resolveApprovalItem(state?.items ?? [], id, optionId !== "cancelled");
+    if (optionId === "cancelled") {
+      pending.resolve({ outcome: { outcome: "cancelled" } });
+    } else {
+      const option = pending.options.find((candidate) => candidate.optionId === optionId);
+      pending.resolve(option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } });
+    }
+    this.postSnapshot();
+  }
+
+  private async refreshStatus(client: AcpClient, folder: vscode.WorkspaceFolder): Promise<void> {
+    try {
+      const status = await client.status();
+      const state = this.stateFor(folder);
+      state.running = status.running;
+      state.usage = status.lastUsage ?? state.usage;
+      this.updateStatusBar(folder);
+    } catch {
+      // Older ACP agents may not expose session/status.
+    }
+  }
+
+  private async refreshSurfaces(client: AcpClient, folder: vscode.WorkspaceFolder): Promise<void> {
+    try {
+      this.stateFor(folder).surfaces = await client.listSurfaces();
+    } catch {
+      // Surface metadata is optional.
+    }
+  }
+
   private postSnapshot(): void {
+    const folder = this.currentWorkspaceFolder();
+    const state = folder ? this.stateFor(folder) : emptyState();
     const snapshot: ChatSnapshot = {
-      items: this.items,
-      running: this.running,
-      disconnected: this.disconnected,
-      status: this.status,
+      ...state,
+      workspace: folder?.name ?? "No workspace",
+      contextMode: vscode.workspace.getConfiguration("reasonix").get<string>("includeSelectionMode", "selectionOnly"),
     };
+    this.updateStatusBar(folder);
     void this.view?.webview.postMessage({ type: "stateSnapshot", state: snapshot });
   }
 
@@ -314,18 +477,26 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
 <body>
   <div class="shell">
     <header class="toolbar">
-      <div id="status" class="status">Idle</div>
-      <div class="actions">
-        <button id="newSession" class="secondary" type="button">New</button>
-        <button id="insertSelection" class="secondary" type="button">Selection</button>
-        <button id="cancel" class="secondary" type="button">Cancel</button>
+      <div class="status-cluster">
+        <span id="statusDot" class="status-dot"></span>
+        <div class="status-copy">
+          <div id="status" class="status">Idle</div>
+          <div id="workspaceName" class="workspace-name"></div>
+        </div>
+      </div>
+      <div class="toolbar-actions">
+        <button id="newSession" class="icon-button" title="New session" aria-label="New session" type="button">+</button>
+        <button id="insertSelection" class="icon-button" title="Insert editor context" aria-label="Insert editor context" type="button">@</button>
+        <button id="cancel" class="icon-button danger" title="Stop turn" aria-label="Stop turn" type="button">Stop</button>
       </div>
     </header>
     <main id="transcript" class="transcript"></main>
     <form id="composer" class="composer">
-      <textarea id="prompt" placeholder="Ask Reasonix about this workspace"></textarea>
-      <div class="actions">
-        <button id="send" type="submit">Send</button>
+      <div id="contextHint" class="context-hint"></div>
+      <textarea id="prompt" rows="3" placeholder="Message Reasonix"></textarea>
+      <div class="composer-footer">
+        <div id="surfaceBar" class="surface-bar"></div>
+        <button id="send" class="send-button" type="submit">Send</button>
       </div>
     </form>
   </div>
@@ -345,8 +516,38 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     return vscode.workspace.workspaceFolders?.[0];
   }
 
-  private sessionStorageKey(folder = this.currentWorkspaceFolder()): string {
-    return `reasonix.session.${folder?.uri.toString() ?? "global"}`;
+  private stateFor(folder: vscode.WorkspaceFolder): WorkspaceChatState {
+    const key = workspaceKey(folder);
+    let state = this.states.get(key);
+    if (!state) {
+      state = emptyState();
+      this.states.set(key, state);
+    }
+    return state;
+  }
+
+  private sessionStorageKey(folder: vscode.WorkspaceFolder): string {
+    return `reasonix.session.${workspaceKey(folder)}`;
+  }
+
+  private updateStatusBar(folder: vscode.WorkspaceFolder | undefined): void {
+    if (!folder) {
+      this.statusBar.text = "$(sparkle) Reasonix";
+      this.statusBar.tooltip = "Open a workspace folder to use Reasonix.";
+      return;
+    }
+    const state = this.stateFor(folder);
+    const usage = state.usage;
+    const denom = usage ? usage.sessionCacheHitTokens + usage.sessionCacheMissTokens : 0;
+    const hitRate = usage && denom > 0 ? Math.round((usage.sessionCacheHitTokens / denom) * 100) : undefined;
+    this.statusBar.text = hitRate === undefined ? `$(sparkle) Reasonix: ${state.status}` : `$(sparkle) Reasonix cache ${hitRate}%`;
+    this.statusBar.tooltip = usage
+      ? `Reasonix ${folder.name}\n${state.status}\nTokens: ${usage.totalTokens}\nSession cache: ${hitRate ?? 0}%`
+      : `Reasonix ${folder.name}\n${state.status}`;
+  }
+
+  private appendOutput(value: string, folder?: vscode.WorkspaceFolder): void {
+    this.output.appendLine(redactLocalPaths(value, folder?.uri.fsPath));
   }
 }
 
@@ -372,17 +573,29 @@ async function resolveReasonixBinary(): Promise<string | undefined> {
   return undefined;
 }
 
+function workspaceKey(folder: vscode.WorkspaceFolder): string {
+  return folder.uri.toString();
+}
+
+function emptyState(): WorkspaceChatState {
+  return { items: [], running: false, disconnected: true, status: "Idle" };
+}
+
 function permissionDetail(params: PermissionRequestParams): string {
-  const parts = [`Kind: ${params.toolCall.kind ?? "other"}`];
-  if (params.toolCall.rawInput !== undefined) {
-    parts.push("Input:");
-    parts.push(truncate(JSON.stringify(params.toolCall.rawInput, null, 2), 2000));
+  const lines = [`Kind: ${params.toolCall.kind ?? "other"}`];
+  if (params.toolCall.preview) {
+    lines.push(`Target: ${params.toolCall.preview.path}`);
+    lines.push(`Change: +${params.toolCall.preview.added} -${params.toolCall.preview.removed}`);
   }
-  return parts.join("\n");
+  if (params.toolCall.rawInput !== undefined) {
+    lines.push("Input:");
+    lines.push(truncate(JSON.stringify(params.toolCall.rawInput, null, 2), 2000));
+  }
+  return lines.join("\n");
 }
 
 function truncate(value: string, max: number): string {
-  return value.length <= max ? value : value.slice(0, max) + "\n...(truncated)";
+  return value.length <= max ? value : `${value.slice(0, max)}\n...(truncated)`;
 }
 
 function getNonce(): string {

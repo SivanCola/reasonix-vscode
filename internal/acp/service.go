@@ -67,6 +67,10 @@ func Serve(ctx context.Context, r io.Reader, w io.Writer, factory Factory, info 
 	conn.Handle("session/new", svc.sessionNew)
 	conn.Handle("session/load", svc.sessionLoad)
 	conn.Handle("session/prompt", svc.sessionPrompt)
+	conn.Handle("session/status", svc.sessionStatus)
+	conn.Handle("model/list", svc.modelList)
+	conn.Handle("effort/set", svc.effortSet)
+	conn.Handle("surface/list", svc.surfaceList)
 	conn.HandleNotify("session/cancel", svc.sessionCancel)
 	defer svc.closeAll()
 	return conn.Serve(ctx)
@@ -81,6 +85,11 @@ type service struct {
 
 	mu       sync.Mutex
 	sessions map[string]*acpSession
+}
+
+type modelProvider interface {
+	ListModels() (ModelListResult, error)
+	SetEffort(EffortSetParams) (EffortSetResult, error)
 }
 
 // acpSession is one open session: its controller, the on-disk transcript path
@@ -279,6 +288,85 @@ func (s *service) sessionPrompt(ctx context.Context, raw json.RawMessage) (any, 
 	return res, nil
 }
 
+func (s *service) sessionStatus(_ context.Context, raw json.RawMessage) (any, error) {
+	var p SessionStatusParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, &RPCError{Code: ErrInvalidParams, Message: "session/status: " + err.Error()}
+	}
+	sess := s.session(p.SessionID)
+	if sess == nil {
+		return nil, &RPCError{Code: ErrInvalidParams, Message: "session/status: unknown session " + p.SessionID}
+	}
+	used, window := sess.ctrl.ContextSnapshot()
+	hit, miss := sess.ctrl.SessionCache()
+	out := SessionStatusResult{
+		Label:           sess.ctrl.Label(),
+		Running:         sess.ctrl.Running(),
+		Used:            used,
+		Window:          window,
+		CacheHit:        hit,
+		CacheMiss:       miss,
+		ConfiguredMCP:   sess.ctrl.ConfiguredMCPNames(),
+		DisconnectedMCP: sess.ctrl.DisconnectedMCPNames(),
+	}
+	if h := sess.ctrl.Host(); h != nil {
+		out.ConnectedMCP = h.ServerNames()
+	}
+	if u := sess.ctrl.LastUsage(); u != nil {
+		out.LastUsage = &UsageUpdateData{
+			PromptTokens:           u.PromptTokens,
+			CompletionTokens:       u.CompletionTokens,
+			TotalTokens:            u.TotalTokens,
+			CacheHitTokens:         u.CacheHitTokens,
+			CacheMissTokens:        u.CacheMissTokens,
+			ReasoningTokens:        u.ReasoningTokens,
+			SessionCacheHitTokens:  hit,
+			SessionCacheMissTokens: miss,
+		}
+	}
+	return out, nil
+}
+
+func (s *service) modelList(_ context.Context, _ json.RawMessage) (any, error) {
+	mp, ok := s.factory.(modelProvider)
+	if !ok {
+		return nil, &RPCError{Code: ErrMethodNotFound, Message: "model/list unsupported"}
+	}
+	out, err := mp.ListModels()
+	if err != nil {
+		return nil, &RPCError{Code: ErrInternal, Message: "model/list: " + err.Error()}
+	}
+	return out, nil
+}
+
+func (s *service) effortSet(_ context.Context, raw json.RawMessage) (any, error) {
+	var p EffortSetParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, &RPCError{Code: ErrInvalidParams, Message: "effort/set: " + err.Error()}
+	}
+	mp, ok := s.factory.(modelProvider)
+	if !ok {
+		return nil, &RPCError{Code: ErrMethodNotFound, Message: "effort/set unsupported"}
+	}
+	out, err := mp.SetEffort(p)
+	if err != nil {
+		return nil, &RPCError{Code: ErrInvalidParams, Message: "effort/set: " + err.Error()}
+	}
+	return out, nil
+}
+
+func (s *service) surfaceList(_ context.Context, raw json.RawMessage) (any, error) {
+	var p SurfaceListParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, &RPCError{Code: ErrInvalidParams, Message: "surface/list: " + err.Error()}
+	}
+	sess := s.session(p.SessionID)
+	if sess == nil {
+		return nil, &RPCError{Code: ErrInvalidParams, Message: "surface/list: unknown session " + p.SessionID}
+	}
+	return surfaceListFor(sess.ctrl), nil
+}
+
 // sessionCancel aborts a session's in-flight turn, if any. It is a notification:
 // no reply, and an unknown session is silently ignored.
 func (s *service) sessionCancel(_ context.Context, raw json.RawMessage) {
@@ -325,6 +413,85 @@ func mcpSpecs(in []MCPServerSpec) []plugin.Spec {
 			Args:    m.Args,
 			Env:     m.Env,
 		})
+	}
+	return out
+}
+
+func surfaceListFor(ctrl *control.Controller) SurfaceListResult {
+	var out SurfaceListResult
+	for _, c := range ctrl.Commands() {
+		out.Commands = append(out.Commands, SlashCommandInfo{
+			Name:         c.Name,
+			Description:  c.Description,
+			ArgumentHint: c.ArgHint,
+			Source:       c.Source,
+		})
+	}
+	for _, sk := range ctrl.Skills() {
+		out.Skills = append(out.Skills, SkillInfo{
+			Name:        sk.Name,
+			Scope:       string(sk.Scope),
+			Subagent:    sk.RunAs == "subagent",
+			Description: sk.Description,
+		})
+	}
+	for _, sk := range ctrl.DisabledSkills() {
+		out.DisabledSkills = append(out.DisabledSkills, SkillInfo{
+			Name:        sk.Name,
+			Scope:       string(sk.Scope),
+			Subagent:    sk.RunAs == "subagent",
+			Description: sk.Description,
+		})
+	}
+	out.SlashCompletions = append(out.SlashCompletions,
+		SlashCompletionInfo{Label: "/mcp", Insert: "/mcp ", Hint: "manage MCP servers", Descend: true},
+		SlashCompletionInfo{Label: "/model", Insert: "/model ", Hint: "switch model", Descend: true},
+		SlashCompletionInfo{Label: "/effort", Insert: "/effort ", Hint: "set reasoning effort", Descend: true},
+		SlashCompletionInfo{Label: "/skills", Insert: "/skills ", Hint: "manage skills", Descend: true},
+		SlashCompletionInfo{Label: "/compact", Insert: "/compact", Hint: "compact context"},
+		SlashCompletionInfo{Label: "/new", Insert: "/new", Hint: "new session"},
+	)
+	for _, c := range out.Commands {
+		out.SlashCompletions = append(out.SlashCompletions, SlashCompletionInfo{Label: "/" + c.Name, Insert: "/" + c.Name + " ", Hint: c.Description})
+	}
+	for _, sk := range out.Skills {
+		out.SlashCompletions = append(out.SlashCompletions, SlashCompletionInfo{Label: "/" + sk.Name, Insert: "/" + sk.Name + " ", Hint: sk.Description})
+	}
+	if h := ctrl.Host(); h != nil {
+		for _, s := range h.Servers() {
+			info := MCPServerInfo{
+				Name:      s.Name,
+				Transport: s.Transport,
+				Tools:     s.Tools,
+				Prompts:   s.Prompts,
+				Resources: s.Resources,
+				Status:    "connected",
+			}
+			for _, t := range s.ToolList {
+				info.ToolList = append(info.ToolList, MCPToolInfo{Name: t.Name, Description: t.Description})
+			}
+			out.MCPServers = append(out.MCPServers, info)
+		}
+		for _, f := range h.Failures() {
+			out.MCPServers = append(out.MCPServers, MCPServerInfo{Name: f.Name, Transport: f.Transport, Status: "failed", Error: f.Error})
+		}
+		for _, p := range h.Prompts() {
+			info := MCPPromptInfo{Name: p.Name, Server: p.Server, Description: p.Description}
+			for _, a := range p.Args {
+				info.Args = append(info.Args, a.Name)
+			}
+			out.MCPPrompts = append(out.MCPPrompts, info)
+			out.SlashCompletions = append(out.SlashCompletions, SlashCompletionInfo{Label: "/" + p.Name, Insert: "/" + p.Name + " ", Hint: p.Description})
+		}
+		for _, r := range h.Resources() {
+			out.MCPResources = append(out.MCPResources, MCPResourceInfo{
+				URI:         r.URI,
+				Server:      r.Server,
+				Name:        r.Name,
+				MimeType:    r.MimeType,
+				Description: r.Description,
+			})
+		}
 	}
 	return out
 }

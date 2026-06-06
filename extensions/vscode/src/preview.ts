@@ -24,6 +24,11 @@ export class DiffPreviewProvider implements vscode.TextDocumentContentProvider {
   }
 
   async previewPermission(params: PermissionRequestParams, workspaceFolder: vscode.WorkspaceFolder | undefined): Promise<void> {
+    if (params.toolCall.preview && params.toolCall.preview.binary !== true) {
+      const target = resolveTarget(params.toolCall.preview.path, workspaceFolder);
+      await this.openPreview(target, params.toolCall.preview.oldText ?? "", params.toolCall.preview.newText ?? "", workspaceFolder);
+      return;
+    }
     const raw = params.toolCall.rawInput;
     if (!isRecord(raw)) {
       return;
@@ -41,6 +46,10 @@ export class DiffPreviewProvider implements vscode.TextDocumentContentProvider {
       return;
     }
 
+    await this.openPreview(target, oldText, nextText, workspaceFolder);
+  }
+
+  private async openPreview(target: vscode.Uri, oldText: string, nextText: string, workspaceFolder: vscode.WorkspaceFolder | undefined): Promise<void> {
     const title = `Reasonix Preview: ${workspaceFolder ? path.relative(workspaceFolder.uri.fsPath, target.fsPath) : target.fsPath}`;
     const oldUri = oldText === "" ? this.putVirtual("old", target, oldText) : target;
     const newUri = this.putVirtual("new", target, nextText);

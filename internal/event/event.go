@@ -12,6 +12,7 @@
 package event
 
 import (
+	"reasonix/internal/diff"
 	"reasonix/internal/evidence"
 	"reasonix/internal/nilutil"
 	"reasonix/internal/provider"
@@ -139,6 +140,7 @@ type Approval struct {
 	Tool    string
 	Subject string
 	Args    string // raw JSON arguments for host UIs that can preview the pending call
+	Preview *diff.Change
 }
 
 // AskOption is one choice the user can pick for an AskQuestion.

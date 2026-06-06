@@ -53,7 +53,8 @@ export interface SessionUpdateParams {
 export type SessionUpdate =
   | MessageChunkUpdate
   | ToolCallUpdate
-  | ToolCallResultUpdate;
+  | ToolCallResultUpdate
+  | UsageUpdate;
 
 export interface MessageChunkUpdate {
   sessionUpdate: "user_message_chunk" | "agent_message_chunk" | "agent_thought_chunk";
@@ -73,6 +74,7 @@ export interface ToolCallUpdate {
   kind?: "read" | "edit" | "search" | "execute" | "other" | string;
   status?: "pending" | "completed" | "failed" | string;
   rawInput?: unknown;
+  preview?: ChangePreview;
 }
 
 export interface ToolCallResultUpdate {
@@ -85,6 +87,46 @@ export interface ToolCallResultUpdate {
   }>;
 }
 
+export interface UsageUpdate {
+  sessionUpdate: "usage";
+  usage: UsageData;
+}
+
+export interface UsageData {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cacheHitTokens: number;
+  cacheMissTokens: number;
+  reasoningTokens?: number;
+  sessionCacheHitTokens: number;
+  sessionCacheMissTokens: number;
+  cost?: number;
+  currency?: string;
+  cacheDiagnostics?: {
+    prefixHash: string;
+    prefixChanged: boolean;
+    prefixChangeReasons?: string[];
+    systemHash: string;
+    toolsHash: string;
+    logRewriteVersion: number;
+    toolSchemaTokens: number;
+    cacheMissTokens: number;
+    cacheHitTokens: number;
+  };
+}
+
+export interface ChangePreview {
+  path: string;
+  kind: string;
+  oldText?: string;
+  newText?: string;
+  added: number;
+  removed: number;
+  diff?: string;
+  binary?: boolean;
+}
+
 export interface PermissionRequestParams {
   sessionId: string;
   toolCall: {
@@ -93,6 +135,7 @@ export interface PermissionRequestParams {
     kind?: string;
     status?: string;
     rawInput?: unknown;
+    preview?: ChangePreview;
   };
   options: Array<{
     optionId: string;
@@ -105,6 +148,99 @@ export interface PermissionRequestParams {
       | "reject_always"
       | string;
   }>;
+}
+
+export interface SessionStatusResult {
+  label: string;
+  running: boolean;
+  used: number;
+  window: number;
+  cacheHit: number;
+  cacheMiss: number;
+  lastUsage?: UsageData;
+  connectedMcp?: string[];
+  configuredMcp?: string[];
+  disconnectedMcp?: string[];
+}
+
+export interface ModelListResult {
+  defaultModel?: string;
+  currentModel?: string;
+  models: ModelInfo[];
+}
+
+export interface ModelInfo {
+  ref: string;
+  provider: string;
+  model: string;
+  current?: boolean;
+  configured: boolean;
+  effort?: string;
+  effortSupported: boolean;
+  effortLevels?: string[];
+  defaultEffort?: string;
+}
+
+export interface EffortSetResult {
+  modelRef: string;
+  level: string;
+}
+
+export interface SurfaceListResult {
+  commands: SlashCommandInfo[];
+  skills: SkillInfo[];
+  disabledSkills?: SkillInfo[];
+  mcpServers?: MCPServerInfo[];
+  mcpPrompts?: MCPPromptInfo[];
+  mcpResources?: MCPResourceInfo[];
+  slashCompletions?: SlashCompletionInfo[];
+}
+
+export interface SlashCommandInfo {
+  name: string;
+  description?: string;
+  argumentHint?: string;
+  source?: string;
+}
+
+export interface SkillInfo {
+  name: string;
+  scope: string;
+  subagent: boolean;
+  description?: string;
+}
+
+export interface MCPServerInfo {
+  name: string;
+  transport?: string;
+  tools?: number;
+  prompts?: number;
+  resources?: number;
+  status: string;
+  error?: string;
+  toolList?: Array<{ name: string; description?: string }>;
+}
+
+export interface MCPPromptInfo {
+  name: string;
+  server: string;
+  description?: string;
+  args?: string[];
+}
+
+export interface MCPResourceInfo {
+  uri: string;
+  server: string;
+  name?: string;
+  mimeType?: string;
+  description?: string;
+}
+
+export interface SlashCompletionInfo {
+  label: string;
+  insert: string;
+  hint?: string;
+  descend?: boolean;
 }
 
 export interface PermissionRequestResult {

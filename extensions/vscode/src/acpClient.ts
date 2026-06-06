@@ -1,13 +1,18 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Writable } from "node:stream";
 import { JsonRpcPeer } from "./jsonRpc";
+import { redactLocalPaths } from "./sanitize";
 import type {
   InitializeResult,
+  EffortSetResult,
+  ModelListResult,
   PermissionRequestParams,
   PermissionRequestResult,
   SessionNewResult,
   SessionPromptResult,
+  SessionStatusResult,
   SessionUpdateParams,
+  SurfaceListResult,
 } from "./acpTypes";
 
 export type AcpOutput = {
@@ -44,6 +49,10 @@ export class AcpClient {
     return this.runningPrompt;
   }
 
+  get id(): string | undefined {
+    return this.sessionId;
+  }
+
   async start(): Promise<string> {
     if (this.sessionId && this.connected) {
       return this.sessionId;
@@ -52,7 +61,7 @@ export class AcpClient {
     if (this.options.model && this.options.model.trim() !== "") {
       args.push("--model", this.options.model.trim());
     }
-    this.options.output.appendLine(`Starting ${this.options.binaryPath} ${args.join(" ")}`);
+    this.appendLine(`Starting ${this.options.binaryPath} ${args.join(" ")}`);
     this.child = spawn(this.options.binaryPath, args, {
       cwd: this.options.cwd,
       env: process.env,
@@ -64,13 +73,13 @@ export class AcpClient {
       {
         onNotification: (method, params) => this.handleNotification(method, params),
         onRequest: (method, params) => this.handleRequest(method, params),
-        onError: (err) => this.options.output.appendLine(`ACP parse error: ${err.message}`),
+        onError: (err) => this.appendLine(`ACP parse error: ${err.message}`),
       },
-      this.options.trace ? (line) => this.options.output.appendLine(line) : undefined,
+      this.options.trace ? (line) => this.appendLine(line) : undefined,
     );
 
     this.child.stdout.on("data", (chunk: Buffer) => this.peer?.handleData(chunk));
-    this.child.stderr.on("data", (chunk: Buffer) => this.options.output.append(chunk.toString()));
+    this.child.stderr.on("data", (chunk: Buffer) => this.append(chunk.toString()));
     this.child.on("error", (err) => {
       this.peer?.close(err);
       this.options.onDisconnect(err.message);
@@ -100,7 +109,7 @@ export class AcpClient {
         this.options.onSessionId(this.sessionId);
         return this.sessionId;
       } catch (err) {
-        this.options.output.appendLine(`Could not load Reasonix session ${this.options.previousSessionId}: ${errorMessage(err)}`);
+        this.appendLine(`Could not load Reasonix session ${this.options.previousSessionId}: ${errorMessage(err)}`);
       }
     }
 
@@ -132,6 +141,22 @@ export class AcpClient {
       return;
     }
     this.peer.sendNotification("session/cancel", { sessionId: this.sessionId });
+  }
+
+  async status(): Promise<SessionStatusResult> {
+    return await this.requirePeer().sendRequest<SessionStatusResult>("session/status", { sessionId: this.requireSession() });
+  }
+
+  async listModels(): Promise<ModelListResult> {
+    return await this.requirePeer().sendRequest<ModelListResult>("model/list", {});
+  }
+
+  async setEffort(modelRef: string, level: string): Promise<EffortSetResult> {
+    return await this.requirePeer().sendRequest<EffortSetResult>("effort/set", { modelRef, level });
+  }
+
+  async listSurfaces(): Promise<SurfaceListResult> {
+    return await this.requirePeer().sendRequest<SurfaceListResult>("surface/list", { sessionId: this.requireSession() });
   }
 
   dispose(): void {
@@ -169,6 +194,14 @@ export class AcpClient {
       throw new Error("Reasonix session is not ready");
     }
     return this.sessionId;
+  }
+
+  private append(value: string): void {
+    this.options.output.append(redactLocalPaths(value, this.options.cwd));
+  }
+
+  private appendLine(value: string): void {
+    this.options.output.appendLine(redactLocalPaths(value, this.options.cwd));
   }
 }
 

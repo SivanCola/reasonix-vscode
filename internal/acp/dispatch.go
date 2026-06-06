@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"reasonix/internal/diff"
 	"reasonix/internal/event"
 	"reasonix/internal/provider"
 )
@@ -111,6 +112,38 @@ func (s *updateSink) Emit(e event.Event) {
 			})
 		}
 
+	case event.Usage:
+		if e.Usage != nil {
+			u := UsageUpdateData{
+				PromptTokens:           e.Usage.PromptTokens,
+				CompletionTokens:       e.Usage.CompletionTokens,
+				TotalTokens:            e.Usage.TotalTokens,
+				CacheHitTokens:         e.Usage.CacheHitTokens,
+				CacheMissTokens:        e.Usage.CacheMissTokens,
+				ReasoningTokens:        e.Usage.ReasoningTokens,
+				SessionCacheHitTokens:  e.SessionHit,
+				SessionCacheMissTokens: e.SessionMiss,
+			}
+			if e.Pricing != nil {
+				u.Cost = e.Pricing.Cost(e.Usage)
+				u.Currency = e.Pricing.Symbol()
+			}
+			if e.CacheDiagnostics != nil {
+				u.CacheDiagnostics = &CacheDiagnosticsUpdate{
+					PrefixHash:          e.CacheDiagnostics.PrefixHash,
+					PrefixChanged:       e.CacheDiagnostics.PrefixChanged,
+					PrefixChangeReasons: append([]string(nil), e.CacheDiagnostics.PrefixChangeReasons...),
+					SystemHash:          e.CacheDiagnostics.SystemHash,
+					ToolsHash:           e.CacheDiagnostics.ToolsHash,
+					LogRewriteVersion:   e.CacheDiagnostics.LogRewriteVersion,
+					ToolSchemaTokens:    e.CacheDiagnostics.ToolSchemaTokens,
+					CacheMissTokens:     e.CacheDiagnostics.CacheMissTokens,
+					CacheHitTokens:      e.CacheDiagnostics.CacheHitTokens,
+				}
+			}
+			s.send(usageUpdate{SessionUpdate: "usage", Usage: u})
+		}
+
 	case event.CompactionDone:
 		// ACP has no compaction-card concept; surface a one-line note so the host
 		// knows the context was summarized (an aborted pass has no summary).
@@ -192,6 +225,7 @@ func (s *updateSink) requestPermission(a event.Approval) {
 			Kind:       toolKindFor(a.Tool),
 			Status:     "pending",
 			RawInput:   rawJSON(a.Args),
+			Preview:    toChangePreview(a.Preview),
 		},
 		Options: []PermissionOption{
 			{OptionID: string(OptAllowOnce), Name: "Allow", Kind: OptAllowOnce},
@@ -230,6 +264,22 @@ func rawJSON(args string) json.RawMessage {
 		return nil
 	}
 	return json.RawMessage(args)
+}
+
+func toChangePreview(ch *diff.Change) *ChangePreview {
+	if ch == nil {
+		return nil
+	}
+	return &ChangePreview{
+		Path:    ch.Path,
+		Kind:    string(ch.Kind),
+		OldText: ch.OldText,
+		NewText: ch.NewText,
+		Added:   ch.Added,
+		Removed: ch.Removed,
+		Diff:    ch.Diff,
+		Binary:  ch.Binary,
+	}
 }
 
 // clip truncates text to maxResultChars, appending a note, matching dispatch.ts.

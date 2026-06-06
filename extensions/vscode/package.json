@@ -5,14 +5,18 @@
   "version": "0.0.1",
   "publisher": "esengine",
   "license": "MIT",
-  "homepage": "https://github.com/esengine/DeepSeek-Reasonix#readme",
+  "homepage": "https://github.com/SivanCola/reasonix-vscode#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/esengine/DeepSeek-Reasonix.git",
+    "url": "git+https://github.com/SivanCola/reasonix-vscode.git",
     "directory": "extensions/vscode"
   },
   "bugs": {
-    "url": "https://github.com/esengine/DeepSeek-Reasonix/issues"
+    "url": "https://github.com/SivanCola/reasonix-vscode/issues"
+  },
+  "galleryBanner": {
+    "color": "#172033",
+    "theme": "dark"
   },
   "engines": {
     "vscode": "^1.92.0"
@@ -36,6 +40,7 @@
     "media/webview.js",
     "media/styles.css",
     "media/icon.svg",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE",
     "package.json"
@@ -162,6 +167,7 @@
     "watch": "node esbuild.mjs --watch",
     "lint": "tsc --noEmit",
     "test": "npm run compile && node --test dist/test/*.test.js",
+    "test:vscode": "npm run compile && node dist/test/vscode/runTest.js",
     "package": "vsce package",
     "vscode:prepublish": "npm run compile"
   },

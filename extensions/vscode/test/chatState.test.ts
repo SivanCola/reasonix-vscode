@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applySessionUpdate, type ChatItem } from "../src/chatState";
+import { appendApproval, applySessionUpdate, resolveApproval, type ChatItem } from "../src/chatState";
 
 test("applySessionUpdate appends streamed assistant chunks", () => {
   const items: ChatItem[] = [];
@@ -38,4 +38,57 @@ test("applySessionUpdate tracks tool lifecycle", () => {
       content: "ok",
     },
   ]);
+});
+
+test("applySessionUpdate records usage updates compactly", () => {
+  const items: ChatItem[] = [];
+  applySessionUpdate(items, {
+    sessionUpdate: "usage",
+    usage: {
+      promptTokens: 100,
+      completionTokens: 25,
+      totalTokens: 125,
+      cacheHitTokens: 80,
+      cacheMissTokens: 20,
+      sessionCacheHitTokens: 180,
+      sessionCacheMissTokens: 20,
+    },
+  });
+  applySessionUpdate(items, {
+    sessionUpdate: "usage",
+    usage: {
+      promptTokens: 200,
+      completionTokens: 50,
+      totalTokens: 250,
+      cacheHitTokens: 100,
+      cacheMissTokens: 100,
+      sessionCacheHitTokens: 280,
+      sessionCacheMissTokens: 120,
+    },
+  });
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0]?.type, "usage");
+  assert.equal(items[0]?.type === "usage" ? items[0].usage.totalTokens : 0, 250);
+});
+
+test("appendApproval and resolveApproval track inline approval state", () => {
+  const items: ChatItem[] = [];
+  appendApproval(items, {
+    sessionId: "s1",
+    toolCall: {
+      toolCallId: "approval-1",
+      title: "edit_file",
+      kind: "edit",
+      rawInput: { path: "src/app.ts" },
+      preview: { path: "src/app.ts", kind: "edit", added: 1, removed: 1, diff: "@@ -1 +1 @@" },
+    },
+    options: [{ optionId: "allow_once", name: "Allow", kind: "allow_once" }],
+  });
+
+  assert.equal(items[0]?.type, "approval");
+  assert.equal(items[0]?.type === "approval" ? items[0].status : "", "pending");
+
+  resolveApproval(items, "approval-1", true);
+  assert.equal(items[0]?.type === "approval" ? items[0].status : "", "selected");
 });
