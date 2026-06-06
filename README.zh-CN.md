@@ -8,7 +8,7 @@
 
 Reasonix for VS Code 把本地 Reasonix coding agent 带进编辑器。它运行现有的 `reasonix acp` 后端，VS Code 扩展只负责 IDE 宿主层：聊天、工作区会话、编辑器上下文、工具调用审阅、权限确认、取消、模型选择和 usage/cache 遥测。
 
-本仓库的 VS Code 扩展包位于 `extensions/vscode/`。
+本仓库是独立的 VS Code 扩展包仓库，不包含 Reasonix CLI 或上游 Reasonix 源码。
 
 扩展默认不捆绑 Reasonix 二进制。它会优先使用 `reasonix.binaryPath`，未配置时再从 `PATH` 查找 `reasonix`。
 
@@ -114,7 +114,6 @@ Reasonix for VS Code 保持很窄的宿主边界：
 安装依赖并构建扩展：
 
 ```sh
-cd extensions/vscode
 npm install
 npm run compile
 ```
@@ -122,7 +121,6 @@ npm run compile
 常用检查：
 
 ```sh
-cd extensions/vscode
 npm run lint
 npm test
 npm run test:vscode
@@ -131,7 +129,6 @@ npm run test:vscode
 打包 VSIX：
 
 ```sh
-cd extensions/vscode
 npm run package
 ```
 
@@ -139,7 +136,7 @@ npm run package
 
 ## 发布检查
 
-- 在 `extensions/vscode/` 下运行 `npm run lint && npm test && npm run test:vscode && npm run package`。
+- 运行 `npm run lint && npm test && npm run test:vscode && npm run package`。
 - 确认 VSIX 包含 `dist/extension.js`、`media/webview.js`、`media/styles.css`、`media/icon.svg`、`README.md`、`CHANGELOG.md`、`LICENSE` 和 `package.json`。
 - 在 VS Code 或 Cursor 中安装 VSIX，并用真实 `reasonix acp` 后端跑一次手动 smoke test。
 

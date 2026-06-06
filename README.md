@@ -8,7 +8,7 @@
 
 Reasonix for VS Code brings the local Reasonix coding agent into the editor. It runs the existing `reasonix acp` backend and keeps the VS Code extension focused on IDE integration: chat, workspace sessions, editor context, tool-call review, approvals, cancellation, model selection, and usage telemetry.
 
-This repository contains the VS Code extension package under `extensions/vscode/`.
+This repository is the standalone VS Code extension package. It does not include the Reasonix CLI or upstream Reasonix source code.
 
 The extension does not bundle a Reasonix binary. It uses `reasonix.binaryPath` when configured, then falls back to resolving `reasonix` from `PATH`.
 
@@ -114,7 +114,6 @@ Some edits cannot be previewed safely before execution, especially binary files,
 Install dependencies and build the extension:
 
 ```sh
-cd extensions/vscode
 npm install
 npm run compile
 ```
@@ -122,7 +121,6 @@ npm run compile
 Useful checks:
 
 ```sh
-cd extensions/vscode
 npm run lint
 npm test
 npm run test:vscode
@@ -131,7 +129,6 @@ npm run test:vscode
 Package a VSIX:
 
 ```sh
-cd extensions/vscode
 npm run package
 ```
 
@@ -139,7 +136,7 @@ npm run package
 
 ## Release Checklist
 
-- Run `npm run lint && npm test && npm run test:vscode && npm run package` from `extensions/vscode/`.
+- Run `npm run lint && npm test && npm run test:vscode && npm run package`.
 - Confirm the VSIX includes `dist/extension.js`, `media/webview.js`, `media/styles.css`, `media/icon.svg`, `README.md`, `CHANGELOG.md`, `LICENSE`, and `package.json`.
 - Install the VSIX in VS Code or Cursor and run a manual smoke test with a real `reasonix acp` backend.
 
