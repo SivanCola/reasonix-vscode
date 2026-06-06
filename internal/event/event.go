@@ -138,6 +138,7 @@ type Approval struct {
 	ID      string
 	Tool    string
 	Subject string
+	Args    string // raw JSON arguments for host UIs that can preview the pending call
 }
 
 // AskOption is one choice the user can pick for an AskQuestion.

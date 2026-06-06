@@ -162,8 +162,8 @@ func TestToolStruct(t *testing.T) {
 // --- Approval struct ---
 
 func TestApprovalStruct(t *testing.T) {
-	a := Approval{ID: "42", Tool: "bash", Subject: "rm -rf /"}
-	if a.ID != "42" || a.Tool != "bash" || a.Subject != "rm -rf /" {
+	a := Approval{ID: "42", Tool: "bash", Subject: "rm -rf /", Args: `{"command":"rm -rf /"}`}
+	if a.ID != "42" || a.Tool != "bash" || a.Subject != "rm -rf /" || a.Args != `{"command":"rm -rf /"}` {
 		t.Errorf("unexpected approval: %+v", a)
 	}
 }

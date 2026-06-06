@@ -191,6 +191,7 @@ func (s *updateSink) requestPermission(a event.Approval) {
 			Title:      title,
 			Kind:       toolKindFor(a.Tool),
 			Status:     "pending",
+			RawInput:   rawJSON(a.Args),
 		},
 		Options: []PermissionOption{
 			{OptionID: string(OptAllowOnce), Name: "Allow", Kind: OptAllowOnce},

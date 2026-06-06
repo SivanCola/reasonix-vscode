@@ -207,6 +207,35 @@ func TestApprovalAllowOnce(t *testing.T) {
 	}
 }
 
+func TestApprovalRequestCarriesRawArgs(t *testing.T) {
+	got := make(chan event.Approval, 1)
+	seen := make(chan event.Approval, 1)
+	c := New(Options{Sink: event.FuncSink(func(e event.Event) {
+		if e.Kind == event.ApprovalRequest {
+			got <- e.Approval
+		}
+	})})
+	go func() {
+		req := <-got
+		seen <- req
+		c.Approve(req.ID, false, false, false)
+	}()
+
+	args := json.RawMessage(`{"command":"go test ./..."}`)
+	allow, _, err := gateApprover{c}.Approve(context.Background(), "bash", "go test ./...", args)
+	if err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if allow {
+		t.Fatal("approval should be denied by test callback")
+	}
+
+	req := <-seen
+	if req.Args != string(args) {
+		t.Fatalf("approval args = %q, want %q", req.Args, string(args))
+	}
+}
+
 // TestApprovalDeny confirms a declined call returns allow=false.
 func TestApprovalDeny(t *testing.T) {
 	c, ids, _ := approvalIDs()

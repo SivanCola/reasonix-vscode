@@ -388,7 +388,7 @@ func (c *Controller) runTurnWithRaw(ctx context.Context, input, raw string) erro
 	}
 	// The plan is already visible as the assistant's answer, so the request
 	// carries no subject — it's purely the gate.
-	allow, _, err := c.requestApproval(ctx, planApprovalTool, "")
+	allow, _, err := c.requestApproval(ctx, planApprovalTool, "", nil)
 	if err != nil {
 		return err
 	}
@@ -1833,7 +1833,7 @@ func (g gateApprover) Approve(ctx context.Context, tool, subject string, args js
 	if auto {
 		return true, false, nil
 	}
-	return g.c.requestApproval(ctx, tool, subject)
+	return g.c.requestApproval(ctx, tool, subject, args)
 }
 
 type seedTodo struct {
@@ -2032,7 +2032,7 @@ func parseRewind(args string, cps []checkpoint.Meta) (int, RewindScope, error) {
 	return turn, scope, nil
 }
 
-func (c *Controller) requestApproval(ctx context.Context, tool, subject string) (bool, bool, error) {
+func (c *Controller) requestApproval(ctx context.Context, tool, subject string, args json.RawMessage) (bool, bool, error) {
 	key := tool + "\x00" + subject
 
 	c.mu.Lock()
@@ -2061,7 +2061,7 @@ func (c *Controller) requestApproval(ctx context.Context, tool, subject string) 
 	c.approvals[id] = reply
 	c.mu.Unlock()
 
-	c.sink.Emit(event.Event{Kind: event.ApprovalRequest, Approval: event.Approval{ID: id, Tool: tool, Subject: subject}})
+	c.sink.Emit(event.Event{Kind: event.ApprovalRequest, Approval: event.Approval{ID: id, Tool: tool, Subject: subject, Args: string(args)}})
 	// The agent now needs the user's attention; a Notification hook can ping an
 	// external channel (desktop notice, phone) while the run blocks on the reply.
 	if subject != "" {

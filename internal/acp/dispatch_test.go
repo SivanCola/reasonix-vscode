@@ -203,6 +203,13 @@ func TestUpdateSinkApprovalAllowAlways(t *testing.T) {
 		if p.ToolCall.ToolCallID != "gate-9" {
 			t.Errorf("toolCallId = %q, want gate-9", p.ToolCall.ToolCallID)
 		}
+		var input map[string]any
+		if err := json.Unmarshal(p.ToolCall.RawInput, &input); err != nil {
+			t.Fatalf("rawInput: %v", err)
+		}
+		if input["command"] != "rm -rf /" {
+			t.Errorf("rawInput = %v", input)
+		}
 		res, _ := json.Marshal(PermissionRequestResult{
 			Outcome: PermissionOutcome{Outcome: "selected", OptionID: string(OptAllowAlways)},
 		})
@@ -212,7 +219,7 @@ func TestUpdateSinkApprovalAllowAlways(t *testing.T) {
 	got := make(chan approveCall, 1)
 	sink.bindApprove(func(id string, allow, session, persist bool) { got <- approveCall{id, allow, session, persist} })
 
-	sink.Emit(event.Event{Kind: event.ApprovalRequest, Approval: event.Approval{ID: "9", Tool: "bash", Subject: "rm -rf /"}})
+	sink.Emit(event.Event{Kind: event.ApprovalRequest, Approval: event.Approval{ID: "9", Tool: "bash", Subject: "rm -rf /", Args: `{"command":"rm -rf /"}`}})
 
 	select {
 	case c := <-got:

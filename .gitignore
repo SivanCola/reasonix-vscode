@@ -40,6 +40,10 @@ mem.prof
 node_modules/
 .pnpm-store/
 .npm/
+/extensions/vscode/dist/
+/extensions/vscode/media/webview.js
+/extensions/vscode/media/webview.js.map
+/extensions/vscode/*.vsix
 
 # Project-local Reasonix state; keep the checked-in review command.
 /.reasonix/*

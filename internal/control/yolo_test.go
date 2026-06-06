@@ -72,7 +72,7 @@ func TestRequestApprovalHonorsBypass(t *testing.T) {
 
 	done := make(chan bool, 1)
 	go func() {
-		allow, _, err := c.requestApproval(context.Background(), planApprovalTool, "")
+		allow, _, err := c.requestApproval(context.Background(), planApprovalTool, "", nil)
 		if err != nil {
 			t.Errorf("requestApproval: %v", err)
 		}
@@ -103,7 +103,7 @@ func TestSetBypassAllowsPendingApproval(t *testing.T) {
 	done := make(chan bool, 1)
 	errs := make(chan error, 1)
 	go func() {
-		allow, _, err := c.requestApproval(context.Background(), "multi_edit", "/tmp/file")
+		allow, _, err := c.requestApproval(context.Background(), "multi_edit", "/tmp/file", nil)
 		if err != nil {
 			errs <- err
 			return
@@ -141,7 +141,7 @@ func TestSetModeYoloDrainsPendingApproval(t *testing.T) {
 
 	done := make(chan bool, 1)
 	go func() {
-		allow, _, _ := c.requestApproval(context.Background(), "multi_edit", "/tmp/file")
+		allow, _, _ := c.requestApproval(context.Background(), "multi_edit", "/tmp/file", nil)
 		done <- allow
 	}()
 

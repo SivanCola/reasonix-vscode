@@ -1,0 +1,147 @@
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  color: var(--vscode-foreground);
+  background: var(--vscode-sideBar-background);
+  font: var(--vscode-font-size) var(--vscode-font-family);
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+.shell {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100vh;
+  min-height: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--vscode-sideBar-border);
+}
+
+.status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+}
+
+.transcript {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 8px 14px;
+}
+
+.empty {
+  margin: 12px 2px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.item {
+  margin: 0 0 10px;
+  padding: 8px;
+  border: 1px solid var(--vscode-sideBar-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+}
+
+.item.user {
+  border-color: var(--vscode-focusBorder);
+}
+
+.item.thought {
+  color: var(--vscode-descriptionForeground);
+}
+
+.role,
+.tool-title {
+  margin-bottom: 6px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.text,
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.badge {
+  color: var(--vscode-descriptionForeground);
+}
+
+details {
+  margin-top: 6px;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--vscode-textLink-foreground);
+}
+
+.composer {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--vscode-sideBar-border);
+  background: var(--vscode-sideBar-background);
+}
+
+textarea {
+  width: 100%;
+  min-height: 72px;
+  max-height: 180px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 8px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-sideBar-border));
+  border-radius: 4px;
+}
+
+button {
+  height: 28px;
+  padding: 0 10px;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: 0;
+  border-radius: 4px;
+}
+
+button.secondary {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+
+button:disabled {
+  opacity: 0.55;
+}
