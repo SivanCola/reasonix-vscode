@@ -1,5 +1,11 @@
 # Reasonix for VS Code
 
+<p align="center">
+  <strong>English</strong>
+  &nbsp;·&nbsp;
+  <a href="./README.zh-CN.md">简体中文</a>
+</p>
+
 Reasonix for VS Code brings the local Reasonix coding agent into the editor. It runs the existing `reasonix acp` backend and keeps the VS Code extension focused on IDE integration: chat, workspace sessions, editor context, tool-call review, approvals, cancellation, model selection, and usage telemetry.
 
 This repository contains the VS Code extension package under `extensions/vscode/`.
