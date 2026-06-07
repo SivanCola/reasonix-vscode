@@ -33,6 +33,7 @@ type WorkspaceChatState = {
 type ChatSnapshot = WorkspaceChatState & {
   workspace: string;
   contextMode: string;
+  modelLabel: string;
 };
 
 type PendingApproval = {
@@ -234,6 +235,12 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
         return;
       case "stateSnapshot":
         this.postSnapshot();
+        return;
+      case "pickModel":
+        await this.pickModel();
+        return;
+      case "openPreview":
+        await this.handleOpenPreview(message.id);
         return;
       default:
         assertNever(message);
@@ -460,6 +467,36 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     this.postSnapshot();
   }
 
+  private async handleOpenPreview(id: string): Promise<void> {
+    const folder = this.currentWorkspaceFolder();
+    const state = folder ? this.stateFor(folder) : undefined;
+    if (!state || !folder) {
+      return;
+    }
+    const item = state.items.find(
+      (candidate): candidate is Extract<ChatItem, { type: "tool" }> | Extract<ChatItem, { type: "approval" }> =>
+        (candidate.type === "tool" || candidate.type === "approval") && candidate.id === id,
+    );
+    if (!item) {
+      void this.view?.webview.postMessage({ type: "notice", text: "Preview not available for this item." });
+      return;
+    }
+    try {
+      await this.preview.previewToolCall(
+        {
+          title: "title" in item ? item.title : undefined,
+          kind: "kind" in item ? item.kind : undefined,
+          rawInput: "rawInput" in item ? item.rawInput : undefined,
+          preview: "preview" in item ? item.preview ?? undefined : undefined,
+        },
+        folder,
+      );
+    } catch (err) {
+      this.appendOutput(`Reasonix open preview failed: ${errorMessage(err)}`, folder);
+      void this.view?.webview.postMessage({ type: "notice", text: "Could not open diff preview." });
+    }
+  }
+
   private clearPendingApprovals(stateKey: string): void {
     for (const [id, pending] of this.pendingApprovals) {
       if (pending.stateKey === stateKey) {
@@ -491,10 +528,12 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
   private postSnapshot(): void {
     const folder = this.currentWorkspaceFolder();
     const state = folder ? this.stateFor(folder) : emptyState();
+    const config = vscode.workspace.getConfiguration("reasonix");
     const snapshot: ChatSnapshot = {
       ...state,
       workspace: folder?.name ?? "No workspace",
-      contextMode: vscode.workspace.getConfiguration("reasonix").get<string>("includeSelectionMode", "selectionOnly"),
+      contextMode: config.get<string>("includeSelectionMode", "selectionOnly"),
+      modelLabel: config.get<string>("model", "") || "Default model",
     };
     this.updateStatusBar(folder);
     void this.view?.webview.postMessage({ type: "stateSnapshot", state: snapshot });
@@ -504,38 +543,67 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     const nonce = getNonce();
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "webview.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "styles.css"));
+    const codiconUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "codicons", "codicon.css"));
+    const iconUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "icon.svg"));
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}'; font-src ${webview.cspSource};">
+  <link rel="stylesheet" href="${codiconUri}">
   <link rel="stylesheet" href="${styleUri}">
   <title>Reasonix</title>
 </head>
 <body>
   <div class="shell">
-    <header class="toolbar">
-      <div class="status-cluster">
-        <span id="statusDot" class="status-dot"></span>
-        <div class="status-copy">
-          <div id="status" class="status">Idle</div>
-          <div id="workspaceName" class="workspace-name"></div>
-        </div>
+    <header class="brand-header">
+      <div class="brand-mark">
+        <img src="${iconUri}" alt="" />
+        <span>Reasonix</span>
       </div>
-      <div class="toolbar-actions">
-        <button id="newSession" class="icon-button" title="New session" aria-label="New session" type="button">+</button>
-        <button id="insertSelection" class="icon-button" title="Insert editor context" aria-label="Insert editor context" type="button">@</button>
-        <button id="cancel" class="icon-button danger" title="Stop turn" aria-label="Stop turn" type="button">Stop</button>
+      <div class="brand-actions" aria-hidden="true">
+        <span class="codicon codicon-pinned"></span>
+        <span class="codicon codicon-ellipsis"></span>
+        <span class="codicon codicon-chrome-close"></span>
       </div>
     </header>
+    <section class="console-header">
+      <div class="header-left">
+        <button class="select-chip workspace-chip" type="button" tabindex="-1">
+          <span class="codicon codicon-folder"></span>
+          <span id="workspaceName" class="workspace-name"></span>
+          <span class="codicon codicon-chevron-down"></span>
+        </button>
+        <button id="modelChip" class="select-chip model-chip" title="Change model" type="button">
+          <span id="modelLabel"></span>
+          <span class="codicon codicon-chevron-down"></span>
+        </button>
+      </div>
+      <div class="header-right">
+        <span id="cacheChip" class="metric-chip cache-chip"></span>
+        <button id="cancel" class="icon-button danger codicon codicon-debug-stop" title="Stop turn" aria-label="Stop turn" type="button" hidden></button>
+        <button id="newSession" class="icon-button codicon codicon-add" title="New session" aria-label="New session" type="button"></button>
+        <button id="insertSelection" class="icon-button codicon codicon-reply" title="Insert editor context" aria-label="Insert editor context" type="button"></button>
+      </div>
+    </section>
+    <div id="statusStrip" class="status-strip"></div>
     <main id="transcript" class="transcript"></main>
     <form id="composer" class="composer">
-      <div id="contextHint" class="context-hint"></div>
-      <textarea id="prompt" rows="3" placeholder="Message Reasonix"></textarea>
+      <div id="composerStats" class="composer-stats"></div>
       <div class="composer-footer">
         <div id="surfaceBar" class="surface-bar"></div>
-        <button id="send" class="send-button" type="submit">Send</button>
+      </div>
+      <div id="contextHint" class="context-hint"></div>
+      <div class="input-row">
+        <textarea id="prompt" rows="3" placeholder="Ask Reasonix anything... (⌘↵ to send)"></textarea>
+        <div class="input-actions">
+          <button class="icon-button codicon codicon-attach" title="Attach context" aria-label="Attach context" type="button" tabindex="-1"></button>
+          <button id="send" class="send-button" type="submit">
+            <span class="codicon codicon-send"></span>
+            <span>Send</span>
+          </button>
+        </div>
       </div>
     </form>
   </div>

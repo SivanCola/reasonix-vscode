@@ -23,3 +23,19 @@ test("parseWebviewMessage accepts approval decisions with stable ids", () => {
     optionId: "allow_once",
   });
 });
+
+test("parseWebviewMessage accepts pickModel", () => {
+  assert.deepEqual(parseWebviewMessage({ command: "pickModel" }), { command: "pickModel" });
+});
+
+test("parseWebviewMessage accepts openPreview with valid id", () => {
+  assert.deepEqual(parseWebviewMessage({ command: "openPreview", id: "tool-1" }), {
+    command: "openPreview",
+    id: "tool-1",
+  });
+});
+
+test("parseWebviewMessage rejects openPreview without id", () => {
+  assert.equal(parseWebviewMessage({ command: "openPreview" }), undefined);
+  assert.equal(parseWebviewMessage({ command: "openPreview", id: 123 }), undefined);
+});

@@ -39,6 +39,8 @@
     "media/webview.js",
     "media/styles.css",
     "media/icon.svg",
+    "media/codicons/codicon.css",
+    "media/codicons/codicon.ttf",
     "CHANGELOG.md",
     "README.md",
     "README.zh-CN.md",
@@ -155,7 +157,7 @@
       "reasonix": [
         {
           "id": "reasonix.chat",
-          "name": "Chat",
+          "name": "Agent Console",
           "type": "webview"
         }
       ]
@@ -174,6 +176,7 @@
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/vscode": "^1.92.0",
+    "@vscode/codicons": "^0.0.45",
     "@vscode/test-electron": "^2.4.1",
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.28.0",

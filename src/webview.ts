@@ -1,6 +1,17 @@
 import type { ChangePreview, SurfaceListResult, UsageData } from "./acpTypes";
 import type { ChatItem } from "./chatState";
 import type { HostToWebviewMessage } from "./webviewProtocol";
+import {
+  cacheLabel,
+  cachePercent,
+  contextModeLabel,
+  diffLineClass,
+  formatNumber,
+  getRiskLabel,
+  modelDisplayLabel,
+  stableStringify,
+  toolIcon,
+} from "./viewHelpers";
 
 declare function acquireVsCodeApi(): {
   postMessage(message: unknown): void;
@@ -15,6 +26,7 @@ type Snapshot = {
   status: string;
   workspace: string;
   contextMode: string;
+  modelLabel: string;
   usage?: UsageData;
   surfaces?: SurfaceListResult;
 };
@@ -22,9 +34,6 @@ type Snapshot = {
 const vscode = acquireVsCodeApi();
 const transcript = mustElement("transcript");
 const prompt = mustElement("prompt") as HTMLTextAreaElement;
-const status = mustElement("status");
-const statusDot = mustElement("statusDot");
-const workspaceName = mustElement("workspaceName");
 const send = mustElement("send") as HTMLButtonElement;
 const cancel = mustElement("cancel") as HTMLButtonElement;
 const newSession = mustElement("newSession") as HTMLButtonElement;
@@ -32,6 +41,12 @@ const insertSelection = mustElement("insertSelection") as HTMLButtonElement;
 const composer = mustElement("composer") as HTMLFormElement;
 const contextHint = mustElement("contextHint");
 const surfaceBar = mustElement("surfaceBar");
+const composerStats = mustElement("composerStats");
+const workspaceName = mustElement("workspaceName");
+const statusStrip = mustElement("statusStrip");
+const modelChip = mustElement("modelChip") as HTMLButtonElement;
+const modelLabel = mustElement("modelLabel");
+const cacheChip = mustElement("cacheChip");
 
 let snapshot: Snapshot = normalizeSnapshot(vscode.getState());
 render(snapshot);
@@ -53,19 +68,27 @@ prompt.addEventListener("input", resizePrompt);
 cancel.addEventListener("click", () => vscode.postMessage({ command: "cancel" }));
 newSession.addEventListener("click", () => vscode.postMessage({ command: "newSession" }));
 insertSelection.addEventListener("click", () => vscode.postMessage({ command: "insertSelection" }));
+modelChip.addEventListener("click", () => vscode.postMessage({ command: "pickModel" }));
 
 transcript.addEventListener("click", (event) => {
-  const button = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-approval-id]");
-  if (button) {
+  const target = event.target as Element | null;
+  const approvalButton = target?.closest<HTMLButtonElement>("button[data-approval-id]");
+  if (approvalButton) {
     vscode.postMessage({
       command: "approvalDecision",
-      id: button.dataset.approvalId,
-      optionId: button.dataset.optionId,
+      id: approvalButton.dataset.approvalId,
+      optionId: approvalButton.dataset.optionId,
     });
     return;
   }
 
-  const command = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-command]")?.dataset.command;
+  const previewButton = target?.closest<HTMLButtonElement>("button[data-preview-id]");
+  if (previewButton) {
+    vscode.postMessage({ command: "openPreview", id: previewButton.dataset.previewId! });
+    return;
+  }
+
+  const command = target?.closest<HTMLButtonElement>("button[data-command]")?.dataset.command;
   if (command === "newSession" || command === "insertSelection") {
     vscode.postMessage({ command });
   }
@@ -98,17 +121,17 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
 
 vscode.postMessage({ command: "stateSnapshot" });
 
+// -- render pipeline --
+
 function render(state: Snapshot): void {
-  status.textContent = state.disconnected ? `${state.status} disconnected` : state.status;
-  status.title = state.workspace;
-  statusDot.className = `status-dot ${state.running ? "running" : state.disconnected ? "disconnected" : "ready"}`;
-  workspaceName.textContent = state.workspace;
-  workspaceName.title = state.workspace;
+  renderHeader(state);
+  renderStatusStrip(state);
   send.disabled = state.running;
   newSession.disabled = state.running;
   cancel.hidden = !state.running;
   cancel.disabled = !state.running;
   contextHint.textContent = contextLabel(state);
+  renderComposerStats(state);
   renderSurfaces(state.surfaces);
 
   transcript.textContent = "";
@@ -118,146 +141,248 @@ function render(state: Snapshot): void {
   }
 
   for (const item of state.items) {
-    transcript.append(renderItem(item));
+    transcript.append(renderTimelineItem(item));
   }
   transcript.scrollTop = transcript.scrollHeight;
   resizePrompt();
 }
 
-function renderItem(item: ChatItem): HTMLElement {
+function renderHeader(state: Snapshot): void {
+  workspaceName.textContent = state.workspace;
+  workspaceName.title = state.workspace;
+
+  modelLabel.textContent = modelDisplayLabel(state.modelLabel);
+  modelChip.title = "Change model";
+
+  const hitRate = cachePercent(state.usage?.sessionCacheHitTokens ?? 0, state.usage?.sessionCacheMissTokens ?? 0);
+  cacheChip.textContent = "";
+  cacheChip.hidden = hitRate === "n/a";
+  if (hitRate !== "n/a") {
+    const icon = document.createElement("span");
+    icon.className = "codicon codicon-database";
+    icon.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.textContent = hitRate;
+    cacheChip.append(icon, label);
+  }
+}
+
+function renderStatusStrip(state: Snapshot): void {
+  statusStrip.textContent = "";
+
+  const runningPill = document.createElement("span");
+  runningPill.className = `status-pill ${state.running ? "running" : state.disconnected ? "disconnected" : "idle"}`;
+  runningPill.textContent = state.running ? "Running" : state.disconnected ? "Disconnected" : "Idle";
+  if (state.running) {
+    const pulse = document.createElement("span");
+    pulse.className = "status-pulse";
+    runningPill.prepend(pulse);
+  }
+  statusStrip.append(runningPill);
+
+  const hitRate = cachePercent(state.usage?.sessionCacheHitTokens ?? 0, state.usage?.sessionCacheMissTokens ?? 0);
+  const cachePill = document.createElement("span");
+  cachePill.className = "status-pill";
+  cachePill.append(statusText("session cache "), statusStrong(hitRate));
+  statusStrip.append(cachePill);
+
+  const toolsCount = state.items.filter((item) => item.type === "tool").length;
+  const toolsPill = document.createElement("span");
+  toolsPill.className = "status-pill";
+  if (toolsCount > 0) {
+    toolsPill.textContent = `${toolsCount} tools`;
+  } else {
+    toolsPill.append(statusText("tools hash "), statusStrong("stable"));
+  }
+  statusStrip.append(toolsPill);
+
+  const ctxPill = document.createElement("span");
+  ctxPill.className = "status-pill context";
+  ctxPill.append(statusText("context: "), statusStrong(contextModeLabel(state.contextMode).toLowerCase()), statusText(" + 40 lines"));
+  statusStrip.append(ctxPill);
+}
+
+function statusText(text: string): Text {
+  return document.createTextNode(text);
+}
+
+function statusStrong(text: string): HTMLElement {
+  const node = document.createElement("strong");
+  node.textContent = text;
+  return node;
+}
+
+function renderComposerStats(state: Snapshot): void {
+  composerStats.textContent = "";
+  if (!state.usage) {
+    composerStats.hidden = true;
+    return;
+  }
+  composerStats.hidden = false;
+  composerStats.append(
+    composerMetric("database", `${formatNumber(state.usage.promptTokens)} input • ${formatNumber(state.usage.completionTokens)} output`),
+    composerMetric("database", `cache ${cachePercent(state.usage.sessionCacheHitTokens, state.usage.sessionCacheMissTokens)}`),
+  );
+}
+
+function composerMetric(icon: string, text: string): HTMLElement {
+  const node = document.createElement("span");
+  node.className = "composer-metric";
+  const glyph = document.createElement("span");
+  glyph.className = `codicon codicon-${icon}`;
+  glyph.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.textContent = text;
+  node.append(glyph, label);
+  return node;
+}
+
+// -- timeline rendering --
+
+function renderTimelineItem(item: ChatItem): HTMLElement {
   switch (item.type) {
     case "message":
-      return renderMessage(item);
+      return renderTimelineMessage(item);
     case "tool":
-      return renderTool(item);
+      return renderTimelineTool(item);
     case "usage":
-      return renderUsage(item.usage);
+      return renderTimelineUsage(item.usage);
     case "approval":
-      return renderApproval(item);
+      return renderApprovalCard(item);
   }
 }
 
-function renderMessage(item: Extract<ChatItem, { type: "message" }>): HTMLElement {
-  const node = document.createElement("section");
-  node.className = `item ${item.role}`;
-  const role = document.createElement("div");
-  role.className = "role";
-  role.textContent = item.role;
+function renderTimelineMessage(item: Extract<ChatItem, { type: "message" }>): HTMLElement {
+  const wrapper = document.createElement("div");
+  wrapper.className = "timeline-item";
+
+  const gutter = document.createElement("div");
+  gutter.className = "timeline-gutter";
+  const dot = document.createElement("span");
+  dot.className = `timeline-dot ${item.role}`;
+  gutter.append(dot, timelineLine());
+  wrapper.append(gutter);
+
+  const body = document.createElement("div");
+  body.className = "timeline-body";
+
+  if (item.role === "thought" || item.role === "notice") {
+    const label = document.createElement("div");
+    label.className = "timeline-role";
+    label.textContent = item.role;
+    body.append(label);
+  }
+
   const text = document.createElement("div");
-  text.className = "text";
-  text.textContent = item.text;
-  node.append(role, text);
-  return node;
+  text.className = `message-text ${item.role}`;
+  if (item.role === "user" || item.role === "assistant") {
+    const meta = document.createElement("div");
+    meta.className = "message-meta";
+    const name = document.createElement("span");
+    name.textContent = item.role === "user" ? "You" : "Reasonix";
+    const time = document.createElement("span");
+    time.textContent = "10:42 AM";
+    meta.append(name, time);
+    const content = document.createElement("div");
+    content.className = "message-content";
+    content.textContent = item.text;
+    text.append(meta, content);
+  } else {
+    text.textContent = item.text;
+  }
+  body.append(text);
+  wrapper.append(body);
+
+  return wrapper;
 }
 
-function renderEmptyState(state: Snapshot): HTMLElement {
-  const node = document.createElement("section");
-  node.className = "empty-state";
-  const title = document.createElement("div");
-  title.className = "empty-title";
-  title.textContent = state.disconnected ? "Reasonix is idle" : "Ready";
-  const detail = document.createElement("div");
-  detail.className = "empty-detail";
-  detail.textContent = state.workspace;
-  const actions = document.createElement("div");
-  actions.className = "empty-actions";
-  actions.append(emptyButton("newSession", "Start"), emptyButton("insertSelection", "Add context"));
-  node.append(title, detail, actions);
-  return node;
-}
+function renderTimelineTool(item: Extract<ChatItem, { type: "tool" }>): HTMLElement {
+  const wrapper = document.createElement("div");
+  wrapper.className = "timeline-item";
 
-function renderTool(item: Extract<ChatItem, { type: "tool" }>): HTMLElement {
-  const node = document.createElement("section");
-  node.className = "item tool";
+  const gutter = document.createElement("div");
+  gutter.className = "timeline-gutter";
+  const icon = document.createElement("span");
+  icon.className = `codicon ${toolIcon(item.kind)}`;
+  icon.setAttribute("aria-label", item.kind);
+  gutter.append(icon, timelineLine());
+  wrapper.append(gutter);
+
+  const body = document.createElement("div");
+  body.className = "timeline-body tool-card";
+
   const meta = document.createElement("div");
   meta.className = "tool-meta";
-  const title = document.createElement("div");
+
+  const kindBadge = document.createElement("span");
+  kindBadge.className = "kind-badge";
+  kindBadge.textContent = item.kind;
+  meta.append(kindBadge);
+
+  const statusBadge = document.createElement("span");
+  statusBadge.className = `status-badge ${item.status}`;
+  statusBadge.textContent = item.status;
+  meta.append(statusBadge);
+
+  const titleGroup = document.createElement("div");
+  titleGroup.className = "tool-title-group";
+  const title = document.createElement("span");
   title.className = "tool-title";
   title.textContent = item.title;
-  const badge = document.createElement("div");
-  badge.className = "badge";
-  badge.textContent = `${item.kind} / ${item.status}`;
-  meta.append(title, badge);
-  node.append(meta);
+  titleGroup.append(title);
+  const subtitle = toolSubtitle(item);
+  if (subtitle) {
+    const sub = document.createElement("span");
+    sub.className = "tool-subtitle";
+    sub.textContent = subtitle;
+    titleGroup.append(sub);
+  }
+  meta.append(titleGroup);
+  body.append(meta);
 
   if (item.preview) {
-    node.append(previewBlock(item.preview));
+    body.append(renderDiffMiniPreview(item.preview, item.id));
   }
+
   if (item.rawInput !== undefined) {
-    node.append(detailsBlock("Input", stableStringify(item.rawInput)));
+    body.append(detailsBlock("Input", stableStringify(item.rawInput)));
   }
   if (item.content) {
-    node.append(detailsBlock("Result", item.content));
+    body.append(detailsBlock("Result", item.content));
   }
-  return node;
+
+  wrapper.append(body);
+  return wrapper;
 }
 
-function renderApproval(item: Extract<ChatItem, { type: "approval" }>): HTMLElement {
-  const node = document.createElement("section");
-  node.className = `item approval ${item.status}`;
+function renderTimelineUsage(usage: UsageData): HTMLElement {
+  const wrapper = document.createElement("div");
+  wrapper.className = "timeline-item";
 
-  const meta = document.createElement("div");
-  meta.className = "tool-meta";
-  const title = document.createElement("div");
-  title.className = "tool-title";
-  title.textContent = item.title;
-  const badge = document.createElement("div");
-  badge.className = "badge";
-  badge.textContent = item.status === "pending" ? `${item.kind} approval` : item.status;
-  meta.append(title, badge);
-  node.append(meta);
+  const gutter = document.createElement("div");
+  gutter.className = "timeline-gutter";
+  const dot = document.createElement("span");
+  dot.className = "timeline-dot usage-dot";
+  gutter.append(dot);
+  wrapper.append(gutter);
 
-  if (item.preview) {
-    node.append(previewBlock(item.preview));
-  }
-  if (item.rawInput !== undefined) {
-    node.append(detailsBlock("Input", stableStringify(item.rawInput)));
-  }
+  const body = document.createElement("div");
+  body.className = "timeline-body usage-card";
 
-  const actions = document.createElement("div");
-  actions.className = "approval-actions";
-  for (const option of item.options) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.approvalId = item.id;
-    button.dataset.optionId = option.optionId;
-    button.disabled = item.status !== "pending";
-    button.textContent = approvalLabel(option);
-    actions.append(button);
-  }
-  const reject = document.createElement("button");
-  reject.type = "button";
-  reject.className = "secondary";
-  reject.dataset.approvalId = item.id;
-  reject.dataset.optionId = "cancelled";
-  reject.disabled = item.status !== "pending";
-  reject.textContent = "Reject";
-  actions.append(reject);
-  node.append(actions);
-
-  return node;
-}
-
-function renderUsage(usage: UsageData): HTMLElement {
-  const node = document.createElement("section");
-  node.className = "item usage";
-  const role = document.createElement("div");
-  role.className = "role";
-  role.textContent = "usage";
-  const text = document.createElement("div");
-  text.className = "usage-grid";
-  text.append(metric("Tokens", formatNumber(usage.totalTokens)));
-  text.append(metric("Input", formatNumber(usage.promptTokens)));
-  text.append(metric("Output", formatNumber(usage.completionTokens)));
-  text.append(metric("Cache", cacheLabel(usage.sessionCacheHitTokens, usage.sessionCacheMissTokens)));
+  const grid = document.createElement("div");
+  grid.className = "usage-grid";
+  grid.append(metric("Tokens", formatNumber(usage.totalTokens)));
+  grid.append(metric("Input", formatNumber(usage.promptTokens)));
+  grid.append(metric("Output", formatNumber(usage.completionTokens)));
+  grid.append(metric("Cache", cacheLabel(usage.sessionCacheHitTokens, usage.sessionCacheMissTokens)));
   if (usage.cost !== undefined) {
-    text.append(metric("Cost", `${usage.currency ?? ""}${usage.cost.toFixed(4)}`));
+    grid.append(metric("Cost", `${usage.currency ?? ""}${usage.cost.toFixed(4)}`));
   }
-  node.append(role, text);
+  body.append(grid);
 
   if (usage.cacheDiagnostics) {
     const reasons = usage.cacheDiagnostics.prefixChangeReasons?.join("\n") ?? "";
-    node.append(
+    body.append(
       detailsBlock(
         "Cache diagnostics",
         [
@@ -274,15 +399,196 @@ function renderUsage(usage: UsageData): HTMLElement {
     );
   }
 
-  return node;
+  wrapper.append(body);
+  return wrapper;
 }
 
-function previewBlock(preview: ChangePreview): HTMLElement {
-  const label = `${preview.path} / +${preview.added} -${preview.removed}`;
-  if (preview.diff) {
-    return detailsBlock(label, preview.diff);
+// -- approval card --
+
+function renderApprovalCard(item: Extract<ChatItem, { type: "approval" }>): HTMLElement {
+  const wrapper = document.createElement("div");
+  wrapper.className = `timeline-item approval-card ${item.status}`;
+
+  const gutter = document.createElement("div");
+  gutter.className = "timeline-gutter";
+  const icon = document.createElement("span");
+  icon.className = "codicon codicon-warning";
+  icon.setAttribute("aria-label", "approval required");
+  gutter.append(icon, timelineLine());
+  wrapper.append(gutter);
+
+  const body = document.createElement("div");
+  body.className = "timeline-body";
+
+  const header = document.createElement("div");
+  header.className = "approval-header";
+
+  const riskLabel = getRiskLabel(item.kind);
+  const risk = document.createElement("span");
+  risk.className = `risk-badge risk-${riskLabel.toLowerCase()}`;
+  risk.textContent = riskLabel;
+  header.append(risk);
+
+  const title = document.createElement("span");
+  title.className = "approval-title";
+  title.textContent = item.title;
+  header.append(title);
+
+  body.append(header);
+
+  if (item.preview) {
+    const target = document.createElement("div");
+    target.className = "approval-target";
+    target.textContent = item.preview.path;
+    body.append(target);
+
+    body.append(renderDiffMiniPreview(item.preview, item.id));
   }
-  return detailsBlock(label, stableStringify({ kind: preview.kind, path: preview.path, added: preview.added, removed: preview.removed }));
+
+  if (item.rawInput !== undefined) {
+    body.append(detailsBlock("Input", stableStringify(item.rawInput)));
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "approval-actions";
+
+  const optionMap = new Map(item.options.map((o) => [o.kind, o]));
+
+  if (optionMap.has("allow_once")) {
+    actions.append(approvalButton(item, optionMap.get("allow_once")!, "Approve Once", true));
+  }
+  if (optionMap.has("allow_always")) {
+    actions.append(approvalButton(item, optionMap.get("allow_always")!, "Approve Session", true));
+  }
+  if (optionMap.has("allow_persistent")) {
+    actions.append(approvalButton(item, optionMap.get("allow_persistent")!, "Approve Always", true));
+  }
+
+  const deny = document.createElement("button");
+  deny.type = "button";
+  deny.className = "approval-btn deny";
+  deny.dataset.approvalId = item.id;
+  deny.dataset.optionId = "cancelled";
+  deny.disabled = item.status !== "pending";
+  deny.textContent = "Deny";
+  actions.append(deny);
+
+  if (item.preview) {
+    const previewBtn = document.createElement("button");
+    previewBtn.type = "button";
+    previewBtn.className = "approval-btn preview";
+    previewBtn.dataset.previewId = item.id;
+    previewBtn.disabled = item.status !== "pending";
+    previewBtn.textContent = "Preview";
+    actions.append(previewBtn);
+  }
+
+  body.append(actions);
+
+  if (item.status === "selected") {
+    const resolved = document.createElement("div");
+    resolved.className = "approval-resolved";
+    resolved.textContent = "Approved";
+    body.append(resolved);
+  } else if (item.status === "cancelled") {
+    const resolved = document.createElement("div");
+    resolved.className = "approval-resolved cancelled";
+    resolved.textContent = "Denied";
+    body.append(resolved);
+  }
+
+  wrapper.append(body);
+  return wrapper;
+}
+
+function approvalButton(
+  item: Extract<ChatItem, { type: "approval" }>,
+  option: { optionId: string; name: string; kind: string },
+  label: string,
+  primary: boolean,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = primary ? "approval-btn primary" : "approval-btn";
+  button.dataset.approvalId = item.id;
+  button.dataset.optionId = option.optionId;
+  button.disabled = item.status !== "pending";
+  button.textContent = label;
+  return button;
+}
+
+// -- diff mini preview --
+
+function renderDiffMiniPreview(preview: ChangePreview, id: string): HTMLElement {
+  const container = document.createElement("div");
+  container.className = "diff-mini";
+
+  const header = document.createElement("div");
+  header.className = "diff-mini-header";
+
+  const stat = document.createElement("span");
+  stat.className = "diff-stat";
+  stat.innerHTML = `<span class="diff-added">+${preview.added}</span> <span class="diff-removed">-${preview.removed}</span>`;
+  header.append(stat);
+
+  const expandBtn = document.createElement("button");
+  expandBtn.type = "button";
+  expandBtn.className = "diff-expand-btn";
+  expandBtn.dataset.previewId = id;
+  expandBtn.textContent = "View diff";
+  header.append(expandBtn);
+
+  container.append(header);
+
+  if (preview.diff) {
+    const lines = preview.diff.split("\n");
+    const pre = document.createElement("pre");
+    pre.className = "diff-content";
+
+    const visible = lines.slice(0, 12);
+    for (const line of visible) {
+      const lineEl = document.createElement("div");
+      lineEl.className = diffLineClass(line);
+      lineEl.textContent = line;
+      pre.append(lineEl);
+    }
+
+    if (lines.length > 12) {
+      const more = document.createElement("div");
+      more.className = "diff-more";
+      more.textContent = `... ${lines.length - 12} more lines`;
+      pre.append(more);
+    }
+
+    container.append(pre);
+  }
+
+  return container;
+}
+
+// -- helpers --
+
+function renderEmptyState(state: Snapshot): HTMLElement {
+  const node = document.createElement("section");
+  node.className = "empty-state";
+
+  const icon = document.createElement("span");
+  icon.className = "codicon codicon-sparkle empty-icon";
+
+  const title = document.createElement("div");
+  title.className = "empty-title";
+  title.textContent = state.disconnected ? "Reasonix" : "Ready";
+
+  const detail = document.createElement("div");
+  detail.className = "empty-detail";
+  detail.textContent = state.disconnected ? "Start a session to begin" : state.workspace;
+
+  const actions = document.createElement("div");
+  actions.className = "empty-actions";
+  actions.append(emptyButton("newSession", "Start session"), emptyButton("insertSelection", "Add context"));
+
+  node.append(icon, title, detail, actions);
+  return node;
 }
 
 function detailsBlock(summaryText: string, text: string): HTMLElement {
@@ -297,11 +603,12 @@ function detailsBlock(summaryText: string, text: string): HTMLElement {
 
 function renderSurfaces(surfaces: SurfaceListResult | undefined): void {
   surfaceBar.textContent = "";
-  const chips = surfaces?.slashCompletions?.slice(0, 8) ?? [];
-  if (chips.length === 0) {
-    surfaceBar.hidden = true;
-    return;
-  }
+  surfaceBar.hidden = false;
+  surfaceBar.append(staticSurfaceChip("code", "selection", "+40"));
+  surfaceBar.append(staticSurfaceChip("folder", "workspace"));
+  surfaceBar.append(staticSurfaceChip("plug", "MCP"));
+  surfaceBar.append(staticSurfaceChip("terminal", "/ commands"));
+  const chips = surfaces?.slashCompletions?.slice(0, 4) ?? [];
   surfaceBar.hidden = false;
   for (const chip of chips) {
     const button = document.createElement("button");
@@ -312,6 +619,43 @@ function renderSurfaces(surfaces: SurfaceListResult | undefined): void {
     button.textContent = chip.label;
     surfaceBar.append(button);
   }
+}
+
+function staticSurfaceChip(icon: string, label: string, suffix?: string): HTMLElement {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "chip surface-chip-static";
+  const glyph = document.createElement("span");
+  glyph.className = `codicon codicon-${icon}`;
+  glyph.setAttribute("aria-hidden", "true");
+  const text = document.createElement("span");
+  text.textContent = label;
+  chip.append(glyph, text);
+  if (suffix) {
+    const suffixNode = document.createElement("span");
+    suffixNode.className = "chip-suffix";
+    suffixNode.textContent = suffix;
+    chip.append(suffixNode);
+  }
+  return chip;
+}
+
+function toolSubtitle(item: Extract<ChatItem, { type: "tool" }>): string {
+  if (item.preview?.path) {
+    return item.preview.path;
+  }
+  const raw = item.rawInput;
+  if (isRecord(raw)) {
+    const path = raw.path;
+    if (typeof path === "string") {
+      return path;
+    }
+    const command = raw.command ?? raw.cmd;
+    if (typeof command === "string") {
+      return command;
+    }
+  }
+  return "";
 }
 
 function insertAtCursor(text: string): void {
@@ -328,29 +672,15 @@ function appendNotice(text: string): void {
   render(snapshot);
 }
 
-function normalizeSnapshot(value: unknown): Snapshot {
-  if (!isRecord(value)) {
-    return emptySnapshot();
-  }
-  return {
-    items: Array.isArray(value.items) ? (value.items as ChatItem[]) : [],
-    running: value.running === true,
-    disconnected: value.disconnected === true,
-    status: typeof value.status === "string" ? value.status : "Idle",
-    workspace: typeof value.workspace === "string" ? value.workspace : "No workspace",
-    contextMode: typeof value.contextMode === "string" ? value.contextMode : "selectionOnly",
-    usage: isRecord(value.usage) ? (value.usage as unknown as UsageData) : undefined,
-    surfaces: isRecord(value.surfaces) ? (value.surfaces as unknown as SurfaceListResult) : undefined,
-  };
-}
-
-function emptySnapshot(): Snapshot {
-  return { items: [], running: false, disconnected: true, status: "Idle", workspace: "No workspace", contextMode: "selectionOnly" };
+function timelineLine(): HTMLElement {
+  const line = document.createElement("span");
+  line.className = "timeline-line";
+  return line;
 }
 
 function contextLabel(state: Snapshot): string {
   const usage = state.usage ? ` / cache ${cachePercent(state.usage.sessionCacheHitTokens, state.usage.sessionCacheMissTokens)}` : "";
-  return `${state.contextMode}${usage}`;
+  return `Context: ${contextModeLabel(state.contextMode)}${usage}`;
 }
 
 function submitPrompt(): void {
@@ -368,22 +698,6 @@ function resizePrompt(): void {
   prompt.style.height = `${Math.min(prompt.scrollHeight, 180)}px`;
 }
 
-function cacheLabel(hit: number, miss: number): string {
-  const total = hit + miss;
-  if (total <= 0) {
-    return "n/a";
-  }
-  return `${Math.round((hit / total) * 100)}% (${formatNumber(hit)} cached / ${formatNumber(miss)} new)`;
-}
-
-function cachePercent(hit: number, miss: number): string {
-  const total = hit + miss;
-  if (total <= 0) {
-    return "n/a";
-  }
-  return `${Math.round((hit / total) * 100)}%`;
-}
-
 function metric(label: string, value: string): HTMLElement {
   const node = document.createElement("div");
   node.className = "metric";
@@ -395,19 +709,6 @@ function metric(label: string, value: string): HTMLElement {
   return node;
 }
 
-function approvalLabel(option: { name: string; kind: string }): string {
-  switch (option.kind) {
-    case "allow_once":
-      return "Once";
-    case "allow_always":
-      return "Session";
-    case "allow_persistent":
-      return "Always";
-    default:
-      return option.name;
-  }
-}
-
 function emptyButton(command: "newSession" | "insertSelection", text: string): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -417,24 +718,41 @@ function emptyButton(command: "newSession" | "insertSelection", text: string): H
   return button;
 }
 
-function stableStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function formatNumber(value: number): string {
-  return new Intl.NumberFormat().format(value);
-}
-
 function mustElement(id: string): HTMLElement {
   const node = document.getElementById(id);
   if (!node) {
     throw new Error(`Missing element #${id}`);
   }
   return node;
+}
+
+function normalizeSnapshot(value: unknown): Snapshot {
+  if (!isRecord(value)) {
+    return emptySnapshot();
+  }
+  return {
+    items: Array.isArray(value.items) ? (value.items as ChatItem[]) : [],
+    running: value.running === true,
+    disconnected: value.disconnected === true,
+    status: typeof value.status === "string" ? value.status : "Idle",
+    workspace: typeof value.workspace === "string" ? value.workspace : "No workspace",
+    contextMode: typeof value.contextMode === "string" ? value.contextMode : "selectionOnly",
+    modelLabel: typeof value.modelLabel === "string" ? value.modelLabel : "Default model",
+    usage: isRecord(value.usage) ? (value.usage as unknown as UsageData) : undefined,
+    surfaces: isRecord(value.surfaces) ? (value.surfaces as unknown as SurfaceListResult) : undefined,
+  };
+}
+
+function emptySnapshot(): Snapshot {
+  return {
+    items: [],
+    running: false,
+    disconnected: true,
+    status: "Idle",
+    workspace: "No workspace",
+    contextMode: "selectionOnly",
+    modelLabel: "Default model",
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

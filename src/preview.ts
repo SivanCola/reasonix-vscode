@@ -28,6 +28,33 @@ export class DiffPreviewProvider implements vscode.TextDocumentContentProvider {
     return this.docs.get(uri.toString()) ?? "";
   }
 
+  async previewToolCall(toolCall: { title?: string; kind?: string; rawInput?: unknown; preview?: { path?: string; kind?: string; added?: number; removed?: number; diff?: string; oldText?: string; newText?: string; binary?: boolean } | null }, workspaceFolder: vscode.WorkspaceFolder | undefined): Promise<void> {
+    const preview = toolCall.preview;
+    if (preview && preview.binary !== true) {
+      const target = resolveTarget(preview.path ?? "", workspaceFolder);
+      await this.openPreview(target, preview.oldText ?? "", preview.newText ?? "", workspaceFolder);
+      return;
+    }
+    const raw = toolCall.rawInput;
+    if (!isRecord(raw)) {
+      return;
+    }
+    const input = raw as PreviewInput;
+    if (typeof input.path !== "string" || input.path.trim() === "") {
+      return;
+    }
+
+    const tool = toolName(toolCall.title);
+    const target = resolveTarget(input.path, workspaceFolder);
+    const oldText = await readText(target);
+    const nextText = applyPreview(tool, oldText, input);
+    if (nextText === undefined || nextText === oldText) {
+      return;
+    }
+
+    await this.openPreview(target, oldText, nextText, workspaceFolder);
+  }
+
   async previewPermission(params: PermissionRequestParams, workspaceFolder: vscode.WorkspaceFolder | undefined): Promise<void> {
     if (params.toolCall.preview && params.toolCall.preview.binary !== true) {
       const target = resolveTarget(params.toolCall.preview.path, workspaceFolder);
