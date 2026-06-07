@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { AcpClient } from "./acpClient";
@@ -75,6 +76,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
   private readonly clients = new Map<string, AcpClient>();
   private readonly states = new Map<string, WorkspaceChatState>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
+  private readonly sending = new Set<string>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -91,6 +93,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     };
     webviewView.webview.html = this.html(webviewView.webview);
     webviewView.webview.onDidReceiveMessage((raw) => void this.handleWebviewMessage(raw), undefined, this.context.subscriptions);
+    webviewView.onDidDispose(() => { this.view = undefined; }, undefined, this.context.subscriptions);
     this.postSnapshot();
 
     if (vscode.workspace.getConfiguration("reasonix").get<boolean>("autoStart", false)) {
@@ -114,6 +117,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       void vscode.window.showWarningMessage("Reasonix is running. Cancel the current turn before starting a new session.");
       return;
     }
+    this.clearPendingApprovals(key);
     this.clients.get(key)?.dispose();
     this.clients.delete(key);
     state.items = [];
@@ -144,7 +148,6 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     }
     const state = this.stateFor(folder);
     this.clients.get(workspaceKey(folder))?.cancel();
-    state.running = false;
     state.status = "Cancelling";
     this.postSnapshot();
   }
@@ -191,6 +194,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       }
     }
 
+    this.clearPendingApprovals(workspaceKey(folder));
     this.clients.get(workspaceKey(folder))?.dispose();
     this.clients.delete(workspaceKey(folder));
     state.items = [];
@@ -243,39 +247,45 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       return;
     }
     const state = this.stateFor(folder);
+    const key = workspaceKey(folder);
     const trimmed = text.trim();
-    if (trimmed === "" || state.running) {
+    if (trimmed === "" || state.running || this.sending.has(key)) {
       return;
     }
-    const client = await this.ensureClient(folder);
-    if (!client) {
-      return;
-    }
-
-    const prompt = appendContext ? await this.promptWithConfirmedContext(trimmed) : trimmed;
-    if (!prompt) {
-      return;
-    }
-    appendUserMessage(state.items, prompt);
-    state.running = true;
-    state.status = "Running";
-    this.postSnapshot();
-
+    this.sending.add(key);
     try {
-      const result = await client.sendPrompt(prompt);
-      if (result.stopReason === "cancelled") {
-        appendNotice(state.items, "Turn cancelled.");
-      } else if (result.stopReason === "error") {
-        appendNotice(state.items, "Turn ended with an error. Check the Reasonix output channel.");
+      const client = await this.ensureClient(folder);
+      if (!client) {
+        return;
       }
-    } catch (err) {
-      appendNotice(state.items, `Reasonix error: ${errorMessage(err)}`);
-      this.appendOutput(`Reasonix prompt failed: ${errorMessage(err)}`, folder);
-    } finally {
-      state.running = false;
-      state.status = state.disconnected ? "Disconnected" : "Idle";
-      await this.refreshStatus(client, folder);
+
+      const prompt = appendContext ? await this.promptWithConfirmedContext(trimmed) : trimmed;
+      if (!prompt) {
+        return;
+      }
+      appendUserMessage(state.items, prompt);
+      state.running = true;
+      state.status = "Running";
       this.postSnapshot();
+
+      try {
+        const result = await client.sendPrompt(prompt);
+        if (result.stopReason === "cancelled") {
+          appendNotice(state.items, "Turn cancelled.");
+        } else if (result.stopReason === "error") {
+          appendNotice(state.items, "Turn ended with an error. Check the Reasonix output channel.");
+        }
+      } catch (err) {
+        appendNotice(state.items, `Reasonix error: ${errorMessage(err)}`);
+        this.appendOutput(`Reasonix prompt failed: ${errorMessage(err)}`, folder);
+      } finally {
+        state.running = false;
+        state.status = state.disconnected ? "Disconnected" : "Idle";
+        await this.refreshStatus(client, folder);
+        this.postSnapshot();
+      }
+    } finally {
+      this.sending.delete(key);
     }
   }
 
@@ -297,15 +307,28 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     return action === "Send without Context" ? prompt : `${prompt.trimEnd()}\n\n${info.text}`;
   }
 
-  private async ensureClient(folder = this.currentWorkspaceFolder()): Promise<AcpClient | undefined> {
+  private readonly starting = new Map<string, Promise<AcpClient | undefined>>();
+
+  private ensureClient(folder = this.currentWorkspaceFolder()): Promise<AcpClient | undefined> {
     if (!folder) {
-      return undefined;
+      return Promise.resolve(undefined);
     }
     const key = workspaceKey(folder);
     const existing = this.clients.get(key);
     if (existing?.connected) {
-      return existing;
+      return Promise.resolve(existing);
     }
+    const inFlight = this.starting.get(key);
+    if (inFlight) {
+      return inFlight;
+    }
+    const p = this.startClient(folder).finally(() => this.starting.delete(key));
+    this.starting.set(key, p);
+    return p;
+  }
+
+  private async startClient(folder: vscode.WorkspaceFolder): Promise<AcpClient | undefined> {
+    const key = workspaceKey(folder);
     const binaryPath = await resolveReasonixBinary();
     if (!binaryPath) {
       return undefined;
@@ -330,6 +353,10 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       onPermissionRequest: (params) => this.handlePermissionRequest(folder, params),
       onDisconnect: (reason) => {
         this.appendOutput(`Reasonix ACP disconnected: ${reason}`, folder);
+        if (this.clients.get(key) !== client) {
+          return;
+        }
+        this.clearPendingApprovals(key);
         this.clients.delete(key);
         state.disconnected = true;
         state.running = false;
@@ -419,21 +446,33 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     }
     this.pendingApprovals.delete(id);
     const state = this.states.get(pending.stateKey);
-    resolveApprovalItem(state?.items ?? [], id, optionId !== "cancelled");
+    let result: PermissionRequestResult;
     if (optionId === "cancelled") {
-      pending.resolve({ outcome: { outcome: "cancelled" } });
+      result = { outcome: { outcome: "cancelled" } };
     } else {
       const option = pending.options.find((candidate) => candidate.optionId === optionId);
-      pending.resolve(option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } });
+      result = option
+        ? { outcome: { outcome: "selected", optionId: option.optionId } }
+        : { outcome: { outcome: "cancelled" } };
     }
+    resolveApprovalItem(state?.items ?? [], id, result.outcome.outcome === "selected");
+    pending.resolve(result);
     this.postSnapshot();
+  }
+
+  private clearPendingApprovals(stateKey: string): void {
+    for (const [id, pending] of this.pendingApprovals) {
+      if (pending.stateKey === stateKey) {
+        this.pendingApprovals.delete(id);
+        pending.resolve({ outcome: { outcome: "cancelled" } });
+      }
+    }
   }
 
   private async refreshStatus(client: AcpClient, folder: vscode.WorkspaceFolder): Promise<void> {
     try {
       const status = await client.status();
       const state = this.stateFor(folder);
-      state.running = status.running;
       state.usage = status.lastUsage ?? state.usage;
       this.updateStatusBar(folder);
     } catch {
@@ -599,12 +638,7 @@ function truncate(value: string, max: number): string {
 }
 
 function getNonce(): string {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let text = "";
-  for (let i = 0; i < 32; i++) {
-    text += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return text;
+  return randomBytes(24).toString("base64url").slice(0, 32);
 }
 
 function errorMessage(err: unknown): string {

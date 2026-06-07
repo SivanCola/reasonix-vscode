@@ -1,12 +1,16 @@
 export function redactLocalPaths(text: string, cwd?: string): string {
   let out = text;
   const home = process.env.HOME || process.env.USERPROFILE;
-  for (const raw of [cwd, home]) {
+  const pairs: [string | undefined, string][] = [
+    [cwd, "${workspace}"],
+    [home, "~"],
+  ];
+  for (const [raw, replacement] of pairs) {
     if (!raw || raw.trim() === "") {
       continue;
     }
-    out = replaceAll(out, raw, raw === home ? "~" : "${workspace}");
-    out = replaceAll(out, raw.replaceAll("\\", "/"), raw === home ? "~" : "${workspace}");
+    out = replaceAll(out, raw, replacement);
+    out = replaceAll(out, raw.replaceAll("\\", "/"), replacement);
   }
   return out;
 }

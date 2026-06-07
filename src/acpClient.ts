@@ -42,7 +42,7 @@ export class AcpClient {
   constructor(private readonly options: AcpClientOptions) {}
 
   get connected(): boolean {
-    return this.child !== undefined && this.peer !== undefined;
+    return this.child !== undefined && this.peer !== undefined && !this.peer.isClosed;
   }
 
   get running(): boolean {
@@ -82,7 +82,7 @@ export class AcpClient {
     this.child.stderr.on("data", (chunk: Buffer) => this.append(chunk.toString()));
     this.child.on("error", (err) => {
       this.peer?.close(err);
-      this.options.onDisconnect(err.message);
+      // "close" always follows "error" in Node.js; onDisconnect is called there to avoid double-firing.
     });
     this.child.on("close", (code, signal) => {
       const reason = signal ? `signal ${signal}` : `exit ${code ?? "unknown"}`;

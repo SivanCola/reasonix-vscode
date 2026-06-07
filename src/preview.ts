@@ -12,11 +12,16 @@ type PreviewInput = {
 
 export class DiffPreviewProvider implements vscode.TextDocumentContentProvider {
   private readonly docs = new Map<string, string>();
+  private readonly docOrder: string[] = [];
+  private readonly maxDocs = 200;
   private readonly emitter = new vscode.EventEmitter<vscode.Uri>();
   readonly onDidChange = this.emitter.event;
 
   register(context: vscode.ExtensionContext): void {
-    context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider("reasonix-preview", this));
+    context.subscriptions.push(
+      this.emitter,
+      vscode.workspace.registerTextDocumentContentProvider("reasonix-preview", this),
+    );
   }
 
   provideTextDocumentContent(uri: vscode.Uri): string {
@@ -63,7 +68,15 @@ export class DiffPreviewProvider implements vscode.TextDocumentContentProvider {
       authority: kind,
       path: `/${id}/${path.basename(target.fsPath)}`,
     });
-    this.docs.set(uri.toString(), content);
+    const key = uri.toString();
+    this.docs.set(key, content);
+    this.docOrder.push(key);
+    if (this.docOrder.length > this.maxDocs) {
+      const oldest = this.docOrder.shift();
+      if (oldest) {
+        this.docs.delete(oldest);
+      }
+    }
     this.emitter.fire(uri);
     return uri;
   }

@@ -19,6 +19,10 @@ export class JsonRpcPeer extends EventEmitter {
   private readonly pending = new Map<number, Pending>();
   private closed = false;
 
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
   constructor(
     private readonly writer: Writable,
     private readonly handlers: JsonRpcPeerHandlers = {},
@@ -102,15 +106,22 @@ export class JsonRpcPeer extends EventEmitter {
   private async handleRequest(frame: JsonRpcRequest): Promise<void> {
     try {
       const result = this.handlers.onRequest ? await this.handlers.onRequest(frame.method, frame.params) : undefined;
-      this.writeFrame({ jsonrpc: "2.0", id: frame.id, result });
+      if (!this.closed) {
+        this.writeFrame({ jsonrpc: "2.0", id: frame.id, result });
+      }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.writeFrame({ jsonrpc: "2.0", id: frame.id, error: { code: -32603, message } });
+      if (!this.closed) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.writeFrame({ jsonrpc: "2.0", id: frame.id, error: { code: -32603, message } });
+      }
     }
   }
 
   private handleResponse(frame: JsonRpcResponse): void {
     const id = typeof frame.id === "number" ? frame.id : Number(frame.id);
+    if (Number.isNaN(id)) {
+      return;
+    }
     const pending = this.pending.get(id);
     if (!pending) {
       return;
@@ -131,6 +142,5 @@ export class JsonRpcPeer extends EventEmitter {
 
   private reportError(err: Error): void {
     this.handlers.onError?.(err);
-    this.emit("error", err);
   }
 }
