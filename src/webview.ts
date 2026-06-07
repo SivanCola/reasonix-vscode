@@ -25,6 +25,8 @@ type Snapshot = {
   disconnected: boolean;
   status: string;
   workspace: string;
+  hasWorkspace: boolean;
+  startError?: string;
   contextMode: string;
   modelLabel: string;
   usage?: UsageData;
@@ -42,6 +44,7 @@ const composer = mustElement("composer") as HTMLFormElement;
 const contextHint = mustElement("contextHint");
 const surfaceBar = mustElement("surfaceBar");
 const composerStats = mustElement("composerStats");
+const workspaceChip = mustElement("workspaceChip") as HTMLButtonElement;
 const workspaceName = mustElement("workspaceName");
 const statusStrip = mustElement("statusStrip");
 const modelChip = mustElement("modelChip") as HTMLButtonElement;
@@ -49,6 +52,8 @@ const modelLabel = mustElement("modelLabel");
 const cacheChip = mustElement("cacheChip");
 
 let snapshot: Snapshot = normalizeSnapshot(vscode.getState());
+let hasRendered = false;
+let lastRenderHadItems = false;
 render(snapshot);
 
 composer.addEventListener("submit", (event) => {
@@ -70,6 +75,13 @@ newSession.addEventListener("click", () => vscode.postMessage({ command: "newSes
 insertSelection.addEventListener("click", () => vscode.postMessage({ command: "insertSelection" }));
 modelChip.addEventListener("click", () => vscode.postMessage({ command: "pickModel" }));
 
+document.addEventListener("click", (event) => {
+  const command = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-command]")?.dataset.command;
+  if (isUiCommand(command)) {
+    vscode.postMessage({ command });
+  }
+});
+
 transcript.addEventListener("click", (event) => {
   const target = event.target as Element | null;
   const approvalButton = target?.closest<HTMLButtonElement>("button[data-approval-id]");
@@ -88,10 +100,6 @@ transcript.addEventListener("click", (event) => {
     return;
   }
 
-  const command = target?.closest<HTMLButtonElement>("button[data-command]")?.dataset.command;
-  if (command === "newSession" || command === "insertSelection") {
-    vscode.postMessage({ command });
-  }
 });
 
 surfaceBar.addEventListener("click", (event) => {
@@ -124,10 +132,18 @@ vscode.postMessage({ command: "stateSnapshot" });
 // -- render pipeline --
 
 function render(state: Snapshot): void {
+  const shouldStickToBottom =
+    hasRendered && lastRenderHadItems && transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 32;
+
   renderHeader(state);
   renderStatusStrip(state);
-  send.disabled = state.running;
-  newSession.disabled = state.running;
+  composer.hidden = !state.hasWorkspace || state.startError !== undefined;
+  send.disabled = state.running || !state.hasWorkspace || state.startError !== undefined;
+  prompt.disabled = !state.hasWorkspace || state.startError !== undefined;
+  prompt.placeholder = state.hasWorkspace ? "Ask Reasonix anything... (⌘↵ to send)" : "Open a folder to start Reasonix";
+  newSession.disabled = state.running || !state.hasWorkspace;
+  insertSelection.disabled = !state.hasWorkspace;
+  modelChip.disabled = state.running || !state.hasWorkspace;
   cancel.hidden = !state.running;
   cancel.disabled = !state.running;
   contextHint.textContent = contextLabel(state);
@@ -135,24 +151,37 @@ function render(state: Snapshot): void {
   renderSurfaces(state.surfaces);
 
   transcript.textContent = "";
+  if (state.startError !== undefined) {
+    transcript.append(renderStartFailedState(state));
+    hasRendered = true;
+    lastRenderHadItems = false;
+    return;
+  }
   if (state.items.length === 0) {
     transcript.append(renderEmptyState(state));
+    hasRendered = true;
+    lastRenderHadItems = false;
     return;
   }
 
   for (const item of state.items) {
     transcript.append(renderTimelineItem(item));
   }
-  transcript.scrollTop = transcript.scrollHeight;
+  if (shouldStickToBottom) {
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+  hasRendered = true;
+  lastRenderHadItems = true;
   resizePrompt();
 }
 
 function renderHeader(state: Snapshot): void {
   workspaceName.textContent = state.workspace;
-  workspaceName.title = state.workspace;
+  workspaceChip.title = state.hasWorkspace ? `Change workspace: ${state.workspace}` : "Open a folder to start Reasonix";
+  workspaceName.title = workspaceChip.title;
 
   modelLabel.textContent = modelDisplayLabel(state.modelLabel);
-  modelChip.title = "Change model";
+  modelChip.title = state.hasWorkspace ? "Change model" : "Open a folder before choosing a model";
 
   const hitRate = cachePercent(state.usage?.sessionCacheHitTokens ?? 0, state.usage?.sessionCacheMissTokens ?? 0);
   cacheChip.textContent = "";
@@ -169,6 +198,32 @@ function renderHeader(state: Snapshot): void {
 
 function renderStatusStrip(state: Snapshot): void {
   statusStrip.textContent = "";
+
+  if (!state.hasWorkspace) {
+    const requiredPill = document.createElement("span");
+    requiredPill.className = "status-pill disconnected";
+    requiredPill.textContent = "Workspace required";
+    statusStrip.append(requiredPill);
+
+    const detailPill = document.createElement("span");
+    detailPill.className = "status-pill";
+    detailPill.append(statusText("open a folder to start "), statusStrong("Reasonix"));
+    statusStrip.append(detailPill);
+    return;
+  }
+
+  if (state.startError !== undefined) {
+    const failedPill = document.createElement("span");
+    failedPill.className = "status-pill disconnected";
+    failedPill.textContent = "Start failed";
+    statusStrip.append(failedPill);
+
+    const detailPill = document.createElement("span");
+    detailPill.className = "status-pill";
+    detailPill.append(statusText("check "), statusStrong("Reasonix CLI"));
+    statusStrip.append(detailPill);
+    return;
+  }
 
   const runningPill = document.createElement("span");
   runningPill.className = `status-pill ${state.running ? "running" : state.disconnected ? "disconnected" : "idle"}`;
@@ -214,7 +269,7 @@ function statusStrong(text: string): HTMLElement {
 
 function renderComposerStats(state: Snapshot): void {
   composerStats.textContent = "";
-  if (!state.usage) {
+  if (!state.hasWorkspace || state.startError !== undefined || !state.usage) {
     composerStats.hidden = true;
     return;
   }
@@ -298,31 +353,31 @@ function renderTimelineMessage(item: Extract<ChatItem, { type: "message" }>): HT
 
 function renderTimelineTool(item: Extract<ChatItem, { type: "tool" }>): HTMLElement {
   const wrapper = document.createElement("div");
-  wrapper.className = "timeline-item";
+  wrapper.className = `timeline-item tool-item ${item.status}`;
 
   const gutter = document.createElement("div");
   gutter.className = "timeline-gutter";
-  const icon = document.createElement("span");
-  icon.className = `codicon ${toolIcon(item.kind)}`;
-  icon.setAttribute("aria-label", item.kind);
-  gutter.append(icon, timelineLine());
+  const step = document.createElement("span");
+  step.className = `tool-step ${toolStatusClass(item)}`;
+  if (toolStatusClass(item) === "completed") {
+    const check = document.createElement("span");
+    check.className = "codicon codicon-check";
+    check.setAttribute("aria-hidden", "true");
+    step.append(check);
+  }
+  gutter.append(step, timelineLine());
   wrapper.append(gutter);
 
   const body = document.createElement("div");
   body.className = "timeline-body tool-card";
 
+  const cardIcon = document.createElement("span");
+  cardIcon.className = `tool-card-icon codicon ${toolIcon(item.kind)}`;
+  cardIcon.setAttribute("aria-hidden", "true");
+  body.append(cardIcon);
+
   const meta = document.createElement("div");
   meta.className = "tool-meta";
-
-  const kindBadge = document.createElement("span");
-  kindBadge.className = "kind-badge";
-  kindBadge.textContent = item.kind;
-  meta.append(kindBadge);
-
-  const statusBadge = document.createElement("span");
-  statusBadge.className = `status-badge ${item.status}`;
-  statusBadge.textContent = item.status;
-  meta.append(statusBadge);
 
   const titleGroup = document.createElement("div");
   titleGroup.className = "tool-title-group";
@@ -338,15 +393,17 @@ function renderTimelineTool(item: Extract<ChatItem, { type: "tool" }>): HTMLElem
     titleGroup.append(sub);
   }
   meta.append(titleGroup);
+
+  const statusBadge = document.createElement("span");
+  statusBadge.className = `status-badge ${toolStatusClass(item)}`;
+  statusBadge.textContent = toolStatusLabel(item);
+  meta.append(statusBadge);
   body.append(meta);
 
   if (item.preview) {
     body.append(renderDiffMiniPreview(item.preview, item.id));
   }
 
-  if (item.rawInput !== undefined) {
-    body.append(detailsBlock("Input", stableStringify(item.rawInput)));
-  }
   if (item.content) {
     body.append(detailsBlock("Result", item.content));
   }
@@ -423,16 +480,34 @@ function renderApprovalCard(item: Extract<ChatItem, { type: "approval" }>): HTML
   const header = document.createElement("div");
   header.className = "approval-header";
 
-  const riskLabel = getRiskLabel(item.kind);
-  const risk = document.createElement("span");
-  risk.className = `risk-badge risk-${riskLabel.toLowerCase()}`;
-  risk.textContent = riskLabel;
-  header.append(risk);
+  const titleGroup = document.createElement("div");
+  titleGroup.className = "approval-title-group";
+  const warning = document.createElement("span");
+  warning.className = "codicon codicon-warning";
+  warning.setAttribute("aria-hidden", "true");
 
   const title = document.createElement("span");
   title.className = "approval-title";
   title.textContent = item.title;
-  header.append(title);
+  titleGroup.append(warning, title);
+  header.append(titleGroup);
+
+  const meta = document.createElement("div");
+  meta.className = "approval-meta";
+  const tool = document.createElement("span");
+  tool.className = "approval-tool";
+  const toolGlyph = document.createElement("span");
+  toolGlyph.className = `codicon ${toolIcon(item.kind)}`;
+  toolGlyph.setAttribute("aria-hidden", "true");
+  const toolName = document.createElement("span");
+  toolName.textContent = item.kind;
+  tool.append(toolGlyph, toolName);
+  const riskLabel = getRiskLabel(item.kind);
+  const risk = document.createElement("span");
+  risk.className = `risk-badge risk-${riskLabel.toLowerCase()}`;
+  risk.textContent = approvalOperationLabel(item.kind);
+  meta.append(tool, risk);
+  header.append(meta);
 
   body.append(header);
 
@@ -441,12 +516,6 @@ function renderApprovalCard(item: Extract<ChatItem, { type: "approval" }>): HTML
     target.className = "approval-target";
     target.textContent = item.preview.path;
     body.append(target);
-
-    body.append(renderDiffMiniPreview(item.preview, item.id));
-  }
-
-  if (item.rawInput !== undefined) {
-    body.append(detailsBlock("Input", stableStringify(item.rawInput)));
   }
 
   const actions = document.createElement("div");
@@ -455,7 +524,7 @@ function renderApprovalCard(item: Extract<ChatItem, { type: "approval" }>): HTML
   const optionMap = new Map(item.options.map((o) => [o.kind, o]));
 
   if (optionMap.has("allow_once")) {
-    actions.append(approvalButton(item, optionMap.get("allow_once")!, "Approve Once", true));
+    actions.append(approvalButton(item, optionMap.get("allow_once")!, "Approve", true));
   }
   if (optionMap.has("allow_always")) {
     actions.append(approvalButton(item, optionMap.get("allow_always")!, "Approve Session", true));
@@ -484,6 +553,10 @@ function renderApprovalCard(item: Extract<ChatItem, { type: "approval" }>): HTML
   }
 
   body.append(actions);
+
+  if (item.preview) {
+    body.append(renderDiffMiniPreview(item.preview, item.id));
+  }
 
   if (item.status === "selected") {
     const resolved = document.createElement("div");
@@ -526,17 +599,22 @@ function renderDiffMiniPreview(preview: ChangePreview, id: string): HTMLElement 
   const header = document.createElement("div");
   header.className = "diff-mini-header";
 
-  const stat = document.createElement("span");
-  stat.className = "diff-stat";
-  stat.innerHTML = `<span class="diff-added">+${preview.added}</span> <span class="diff-removed">-${preview.removed}</span>`;
-  header.append(stat);
-
   const expandBtn = document.createElement("button");
   expandBtn.type = "button";
   expandBtn.className = "diff-expand-btn";
   expandBtn.dataset.previewId = id;
-  expandBtn.textContent = "View diff";
+  const chevron = document.createElement("span");
+  chevron.className = "codicon codicon-chevron-down";
+  chevron.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.textContent = "Diff preview";
+  expandBtn.append(chevron, label);
   header.append(expandBtn);
+
+  const stat = document.createElement("span");
+  stat.className = "diff-stat";
+  stat.innerHTML = `<span class="diff-added">+${preview.added}</span> <span class="diff-removed">-${preview.removed}</span>`;
+  header.append(stat);
 
   container.append(header);
 
@@ -548,7 +626,7 @@ function renderDiffMiniPreview(preview: ChangePreview, id: string): HTMLElement 
     const visible = lines.slice(0, 12);
     for (const line of visible) {
       const lineEl = document.createElement("div");
-      lineEl.className = diffLineClass(line);
+      lineEl.className = `diff-line ${diffLineClass(line)}`;
       lineEl.textContent = line;
       pre.append(lineEl);
     }
@@ -573,21 +651,60 @@ function renderEmptyState(state: Snapshot): HTMLElement {
   node.className = "empty-state";
 
   const icon = document.createElement("span");
-  icon.className = "codicon codicon-sparkle empty-icon";
+  icon.className = `codicon ${state.hasWorkspace ? "codicon-sparkle" : "codicon-folder-opened"} empty-icon`;
 
   const title = document.createElement("div");
   title.className = "empty-title";
-  title.textContent = state.disconnected ? "Reasonix" : "Ready";
+  title.textContent = state.hasWorkspace ? (state.disconnected ? "Reasonix" : "Ready") : "Open a project folder";
 
   const detail = document.createElement("div");
   detail.className = "empty-detail";
-  detail.textContent = state.disconnected ? "Start a session to begin" : state.workspace;
+  detail.textContent = state.hasWorkspace
+    ? state.disconnected
+      ? "Start a session to begin"
+      : state.workspace
+    : "Reasonix needs a workspace so it can read files, preview diffs, and run commands in the right project.";
 
   const actions = document.createElement("div");
   actions.className = "empty-actions";
-  actions.append(emptyButton("newSession", "Start session"), emptyButton("insertSelection", "Add context"));
+  if (state.hasWorkspace) {
+    actions.append(emptyButton("newSession", "Start session"), emptyButton("insertSelection", "Add context"));
+  } else {
+    const open = emptyButton("openFolder", "Open Folder");
+    open.classList.add("primary");
+    actions.append(open);
+  }
 
   node.append(icon, title, detail, actions);
+  return node;
+}
+
+function renderStartFailedState(state: Snapshot): HTMLElement {
+  const node = document.createElement("section");
+  node.className = "empty-state failure-state";
+
+  const icon = document.createElement("span");
+  icon.className = "codicon codicon-warning empty-icon";
+
+  const title = document.createElement("div");
+  title.className = "empty-title";
+  title.textContent = "Reasonix start failed";
+
+  const detail = document.createElement("div");
+  detail.className = "empty-detail";
+  detail.textContent = `Could not start Reasonix in ${state.workspace}.`;
+
+  const error = document.createElement("pre");
+  error.className = "failure-detail";
+  error.textContent = state.startError ?? "Unknown startup error";
+
+  const actions = document.createElement("div");
+  actions.className = "empty-actions";
+  const retry = emptyButton("newSession", "Retry");
+  retry.classList.add("primary");
+  actions.append(retry, emptyButton("openSettings", "Settings"), emptyButton("showOutput", "Output"));
+
+  node.append(icon, title, detail, error, actions);
   return node;
 }
 
@@ -603,6 +720,10 @@ function detailsBlock(summaryText: string, text: string): HTMLElement {
 
 function renderSurfaces(surfaces: SurfaceListResult | undefined): void {
   surfaceBar.textContent = "";
+  if (!snapshot.hasWorkspace || snapshot.startError !== undefined) {
+    surfaceBar.hidden = true;
+    return;
+  }
   surfaceBar.hidden = false;
   surfaceBar.append(staticSurfaceChip("code", "selection", "+40"));
   surfaceBar.append(staticSurfaceChip("folder", "workspace"));
@@ -658,6 +779,51 @@ function toolSubtitle(item: Extract<ChatItem, { type: "tool" }>): string {
   return "";
 }
 
+function toolStatusClass(item: Extract<ChatItem, { type: "tool" }>): string {
+  if (item.status === "completed" || item.status === "success") {
+    return "completed";
+  }
+  if (item.status === "failed" || item.status === "error") {
+    return "failed";
+  }
+  if (item.status === "pending" && (item.kind === "edit" || item.kind === "write" || item.preview)) {
+    return "approval-needed";
+  }
+  return "pending";
+}
+
+function toolStatusLabel(item: Extract<ChatItem, { type: "tool" }>): string {
+  switch (toolStatusClass(item)) {
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "approval-needed":
+      return "Approval needed";
+    default:
+      return "Waiting";
+  }
+}
+
+function approvalOperationLabel(kind: string): string {
+  switch (kind) {
+    case "edit":
+    case "write":
+    case "multi_edit":
+      return "writes file";
+    case "read":
+    case "search":
+    case "grep":
+      return "reads context";
+    case "execute":
+    case "bash":
+    case "shell":
+      return "runs command";
+    default:
+      return "needs approval";
+  }
+}
+
 function insertAtCursor(text: string): void {
   const before = prompt.value.slice(0, prompt.selectionStart);
   const after = prompt.value.slice(prompt.selectionEnd);
@@ -670,6 +836,17 @@ function insertAtCursor(text: string): void {
 function appendNotice(text: string): void {
   snapshot.items.push({ type: "message", role: "notice", text });
   render(snapshot);
+}
+
+function isUiCommand(command: string | undefined): command is "newSession" | "insertSelection" | "openFolder" | "pickWorkspace" | "openSettings" | "showOutput" {
+  return (
+    command === "newSession" ||
+    command === "insertSelection" ||
+    command === "openFolder" ||
+    command === "pickWorkspace" ||
+    command === "openSettings" ||
+    command === "showOutput"
+  );
 }
 
 function timelineLine(): HTMLElement {
@@ -685,7 +862,7 @@ function contextLabel(state: Snapshot): string {
 
 function submitPrompt(): void {
   const text = prompt.value.trim();
-  if (text === "" || snapshot.running) {
+  if (text === "" || snapshot.running || !snapshot.hasWorkspace || snapshot.startError !== undefined) {
     return;
   }
   vscode.postMessage({ command: "sendPrompt", text });
@@ -709,7 +886,7 @@ function metric(label: string, value: string): HTMLElement {
   return node;
 }
 
-function emptyButton(command: "newSession" | "insertSelection", text: string): HTMLButtonElement {
+function emptyButton(command: "newSession" | "insertSelection" | "openFolder" | "openSettings" | "showOutput", text: string): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "secondary";
@@ -736,6 +913,8 @@ function normalizeSnapshot(value: unknown): Snapshot {
     disconnected: value.disconnected === true,
     status: typeof value.status === "string" ? value.status : "Idle",
     workspace: typeof value.workspace === "string" ? value.workspace : "No workspace",
+    hasWorkspace: value.hasWorkspace === true,
+    startError: typeof value.startError === "string" ? value.startError : undefined,
     contextMode: typeof value.contextMode === "string" ? value.contextMode : "selectionOnly",
     modelLabel: typeof value.modelLabel === "string" ? value.modelLabel : "Default model",
     usage: isRecord(value.usage) ? (value.usage as unknown as UsageData) : undefined,
@@ -750,6 +929,7 @@ function emptySnapshot(): Snapshot {
     disconnected: true,
     status: "Idle",
     workspace: "No workspace",
+    hasWorkspace: false,
     contextMode: "selectionOnly",
     modelLabel: "Default model",
   };

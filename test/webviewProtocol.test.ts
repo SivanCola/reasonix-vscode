@@ -28,6 +28,19 @@ test("parseWebviewMessage accepts pickModel", () => {
   assert.deepEqual(parseWebviewMessage({ command: "pickModel" }), { command: "pickModel" });
 });
 
+test("parseWebviewMessage accepts openFolder", () => {
+  assert.deepEqual(parseWebviewMessage({ command: "openFolder" }), { command: "openFolder" });
+});
+
+test("parseWebviewMessage accepts pickWorkspace", () => {
+  assert.deepEqual(parseWebviewMessage({ command: "pickWorkspace" }), { command: "pickWorkspace" });
+});
+
+test("parseWebviewMessage accepts troubleshooting commands", () => {
+  assert.deepEqual(parseWebviewMessage({ command: "openSettings" }), { command: "openSettings" });
+  assert.deepEqual(parseWebviewMessage({ command: "showOutput" }), { command: "showOutput" });
+});
+
 test("parseWebviewMessage accepts openPreview with valid id", () => {
   assert.deepEqual(parseWebviewMessage({ command: "openPreview", id: "tool-1" }), {
     command: "openPreview",

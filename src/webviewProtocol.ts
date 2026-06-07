@@ -3,6 +3,10 @@ export type WebviewToHostMessage =
   | { command: "cancel" }
   | { command: "newSession" }
   | { command: "insertSelection" }
+  | { command: "openFolder" }
+  | { command: "pickWorkspace" }
+  | { command: "openSettings" }
+  | { command: "showOutput" }
   | { command: "approvalDecision"; id: string; optionId: string }
   | { command: "stateSnapshot" }
   | { command: "pickModel" }
@@ -23,6 +27,10 @@ export function parseWebviewMessage(value: unknown): WebviewToHostMessage | unde
     case "cancel":
     case "newSession":
     case "insertSelection":
+    case "openFolder":
+    case "pickWorkspace":
+    case "openSettings":
+    case "showOutput":
     case "stateSnapshot":
     case "pickModel":
       return { command: value.command };

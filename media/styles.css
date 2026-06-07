@@ -21,7 +21,9 @@ body {
   margin: 0;
   color: var(--rx-text);
   background: var(--rx-bg);
-  font: var(--vscode-font-size) var(--vscode-font-family);
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: var(--vscode-font-size, 13px);
+  line-height: 1.4;
 }
 
 button,
@@ -46,8 +48,8 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 58px;
-  padding: 14px 22px 10px;
+  min-height: 56px;
+  padding: 13px 22px 9px;
 }
 
 .brand-mark,
@@ -90,7 +92,7 @@ button {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
-  min-height: 58px;
+  min-height: 56px;
   padding: 0 22px 14px;
   border-bottom: 1px solid var(--rx-border);
 }
@@ -102,6 +104,11 @@ button {
 
 .header-right {
   gap: 10px;
+}
+
+.header-right #newSession,
+.header-right #insertSelection {
+  display: none;
 }
 
 .select-chip,
@@ -126,6 +133,7 @@ button {
 
 .workspace-name,
 .model-chip > span:first-child {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -187,9 +195,9 @@ button {
 .status-strip {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 40px;
-  padding: 0 22px;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 14px;
   overflow-x: auto;
   border-bottom: 1px solid var(--rx-border);
   color: var(--rx-muted);
@@ -202,7 +210,7 @@ button {
   max-width: 100%;
   overflow: hidden;
   padding: 0;
-  font-size: 12px;
+  font-size: 9.5px;
   white-space: nowrap;
 }
 
@@ -210,13 +218,17 @@ button {
   content: "";
   width: 1px;
   height: 18px;
-  margin-left: 12px;
+  margin-left: 7px;
   background: var(--rx-border);
 }
 
 .status-pill strong {
   color: var(--rx-green);
   font-weight: 700;
+}
+
+.status-pill.context strong {
+  color: var(--rx-blue);
 }
 
 .status-pill.running {
@@ -245,7 +257,7 @@ button {
 .transcript {
   min-height: 0;
   overflow: auto;
-  padding: 18px 22px 24px;
+  padding: 16px 22px 18px;
 }
 
 .timeline-item {
@@ -263,7 +275,8 @@ button {
 
 .timeline-avatar,
 .timeline-dot,
-.timeline-gutter > .codicon {
+.timeline-gutter > .codicon,
+.tool-step {
   flex: 0 0 auto;
 }
 
@@ -285,7 +298,7 @@ button {
 }
 
 .timeline-dot.user::before {
-  content: "\eb67";
+  content: "\ea67";
   font: normal normal normal 19px/1 codicon;
   color: var(--rx-muted);
 }
@@ -323,6 +336,32 @@ button {
   font-size: 20px;
 }
 
+.tool-step {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  margin-top: 9px;
+  border: 2px solid var(--rx-border);
+  border-radius: 50%;
+  color: var(--rx-green);
+  background: var(--rx-bg);
+}
+
+.tool-step.completed {
+  border-color: var(--rx-green);
+  font-size: 10px;
+}
+
+.tool-step.pending,
+.tool-step.approval-needed {
+  border-color: var(--rx-blue);
+}
+
+.tool-step.failed {
+  border-color: var(--rx-red);
+}
+
 .approval-card .timeline-gutter > .codicon {
   color: var(--rx-amber);
   border-color: transparent;
@@ -343,7 +382,7 @@ button {
 
 .timeline-body {
   min-width: 0;
-  padding-bottom: 16px;
+  padding-bottom: 13px;
 }
 
 .timeline-role {
@@ -374,8 +413,8 @@ button {
 
 .message-text.user,
 .message-text.assistant {
-  padding: 16px 18px;
-  font-size: 14px;
+  padding: 12px 14px;
+  font-size: 12px;
 }
 
 .message-text.user {
@@ -397,26 +436,48 @@ button {
 .message-meta {
   display: flex;
   gap: 14px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   color: var(--rx-muted);
   font-size: 12px;
   font-weight: 650;
 }
 
 .message-content {
-  font-size: 14px;
+  font-size: 12px;
 }
 
-.tool-card,
+.tool-card {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 40px;
+  padding: 7px 10px;
+}
+
 .usage-card {
-  padding: 10px 12px;
+  padding: 9px 11px;
 }
 
 .tool-meta {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
+}
+
+.tool-card-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  color: var(--rx-muted);
+  font-size: 18px;
+}
+
+.tool-card .diff-mini,
+.tool-card details {
+  grid-column: 1 / -1;
 }
 
 .kind-badge {
@@ -433,7 +494,7 @@ button {
   min-width: 0;
   overflow: hidden;
   color: var(--rx-text);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -443,19 +504,19 @@ button {
   min-width: 0;
   overflow: hidden;
   color: var(--rx-muted);
-  font-size: 12px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .status-badge {
-  height: 26px;
+  height: 24px;
   padding: 0 10px;
   border: 1px solid var(--rx-border);
   border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
-  line-height: 24px;
+  line-height: 22px;
 }
 
 .status-badge.completed,
@@ -468,6 +529,11 @@ button {
 .status-badge.in_progress {
   color: var(--rx-blue);
   border-color: color-mix(in srgb, var(--rx-blue) 70%, var(--rx-border));
+}
+
+.status-badge.approval-needed {
+  color: var(--rx-amber);
+  border-color: color-mix(in srgb, var(--rx-amber) 72%, var(--rx-border));
 }
 
 .status-badge.error,
@@ -505,34 +571,98 @@ button {
 }
 
 .approval-card > .timeline-body {
-  padding: 16px 18px;
+  padding: 12px 14px;
   border-color: var(--rx-border);
 }
 
 .approval-header {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   margin-bottom: 12px;
 }
 
+.approval-title-group,
+.approval-meta,
+.approval-tool,
 .risk-badge {
-  display: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.approval-title-group {
+  min-width: 0;
+  gap: 8px;
+}
+
+.approval-title-group .codicon {
+  flex: 0 0 auto;
+  color: var(--rx-amber);
+  font-size: 18px;
 }
 
 .approval-title {
+  min-width: 0;
+  overflow: hidden;
   color: var(--rx-amber);
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-meta {
+  gap: 8px;
+  min-width: 0;
+}
+
+.approval-tool {
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rx-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-tool .codicon {
+  flex: 0 0 auto;
+}
+
+.risk-badge {
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--rx-border);
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 22px;
+  white-space: nowrap;
+}
+
+.risk-medium {
+  color: #ff8585;
+  border-color: color-mix(in srgb, var(--rx-red) 70%, var(--rx-border));
+}
+
+.risk-high {
+  color: var(--rx-amber);
+  border-color: color-mix(in srgb, var(--rx-amber) 70%, var(--rx-border));
+}
+
+.risk-low,
+.risk-info {
+  color: var(--rx-blue);
+  border-color: color-mix(in srgb, var(--rx-blue) 70%, var(--rx-border));
 }
 
 .approval-target {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
   overflow: hidden;
   color: var(--rx-muted);
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 13px;
+  font-family: var(--vscode-editor-font-family, "SFMono-Regular", Consolas, monospace);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -540,14 +670,14 @@ button {
 .approval-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin: 10px 0 12px;
+  gap: 8px;
+  margin: 8px 0 10px;
 }
 
 .approval-btn {
-  height: 34px;
-  min-width: 86px;
-  padding: 0 14px;
+  height: 30px;
+  min-width: 78px;
+  padding: 0 11px;
   border: 1px solid var(--rx-border);
   border-radius: 4px;
   color: var(--rx-text);
@@ -583,7 +713,7 @@ button {
 
 .diff-mini {
   overflow: hidden;
-  margin-top: 12px;
+  margin-top: 10px;
   border: 1px solid var(--rx-border);
   border-radius: 5px;
 }
@@ -592,8 +722,8 @@ button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 36px;
-  padding: 0 12px;
+  min-height: 32px;
+  padding: 0 10px;
   border-bottom: 1px solid var(--rx-border);
   background: var(--rx-surface);
 }
@@ -615,36 +745,51 @@ button {
 }
 
 .diff-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   height: 24px;
   padding: 0 6px;
   border-radius: 4px;
-  color: var(--rx-text);
+  color: var(--rx-muted);
   background: transparent;
+}
+
+.diff-expand-btn:hover {
+  color: var(--rx-text);
 }
 
 .diff-content {
   margin: 0;
-  max-height: 270px;
+  max-height: 142px;
   overflow: auto;
-  padding: 10px 12px;
+  padding: 0;
   background: var(--vscode-editor-background, #111315);
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 12px;
-  line-height: 1.55;
+  font-family: var(--vscode-editor-font-family, "SFMono-Regular", Consolas, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.diff-content .diff-line {
+  min-height: 18px;
+  padding: 1px 10px;
+  white-space: pre;
 }
 
 .diff-content .diff-hunk {
   color: #8fc7ff;
+  padding-top: 8px;
+  padding-bottom: 3px;
 }
 
 .diff-content .diff-added {
   color: #9ce49b;
-  background: color-mix(in srgb, var(--rx-green) 17%, transparent);
+  background: color-mix(in srgb, var(--rx-green) 18%, transparent);
 }
 
 .diff-content .diff-removed {
   color: #ffaaaa;
-  background: color-mix(in srgb, var(--rx-red) 17%, transparent);
+  background: color-mix(in srgb, var(--rx-red) 20%, transparent);
 }
 
 .diff-content .diff-context {
@@ -673,7 +818,7 @@ pre {
   border-radius: 4px;
   color: var(--vscode-editor-foreground, #d4d4d4);
   background: var(--vscode-textCodeBlock-background, #101214);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--vscode-editor-font-family, "SFMono-Regular", Consolas, monospace);
   font-size: 12px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -684,13 +829,17 @@ pre {
   flex-direction: column;
   align-items: center;
   gap: 9px;
-  padding: 48px 8px;
+  padding: 54px 18px;
   text-align: center;
 }
 
 .empty-icon {
   color: var(--rx-blue);
   font-size: 30px;
+}
+
+.failure-state .empty-icon {
+  color: var(--rx-amber);
 }
 
 .empty-title {
@@ -700,17 +849,31 @@ pre {
 }
 
 .empty-detail {
-  max-width: 100%;
-  overflow: hidden;
+  max-width: 290px;
   color: var(--rx-muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.5;
 }
 
 .empty-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 8px;
   margin-top: 8px;
+}
+
+.failure-detail {
+  width: min(100%, 330px);
+  max-height: 120px;
+  margin: 2px 0 0;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--rx-red) 48%, var(--rx-border));
+  border-radius: 5px;
+  color: #ffb4b4;
+  background: color-mix(in srgb, var(--rx-red) 10%, var(--rx-surface));
+  font-size: 11px;
+  text-align: left;
 }
 
 button.secondary {
@@ -722,12 +885,26 @@ button.secondary {
   background: transparent;
 }
 
+button.secondary.primary {
+  color: var(--vscode-button-foreground, #fff);
+  border-color: var(--vscode-button-background, #0e639c);
+  background: var(--vscode-button-background, #0e639c);
+}
+
+button.secondary.primary:hover {
+  background: var(--vscode-button-hoverBackground, #1177bb);
+}
+
 .composer {
   display: grid;
-  gap: 10px;
-  padding: 12px 22px 18px;
+  gap: 8px;
+  padding: 10px 22px 12px;
   border-top: 1px solid var(--rx-border);
   background: var(--rx-bg);
+}
+
+.composer[hidden] {
+  display: none;
 }
 
 .composer-stats {
@@ -763,9 +940,10 @@ button.secondary {
 
 .surface-bar {
   display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
+  flex-wrap: nowrap;
+  gap: 6px;
   min-width: 0;
+  overflow-x: auto;
 }
 
 .surface-bar[hidden] {
@@ -773,11 +951,11 @@ button.secondary {
 }
 
 .surface-bar .chip {
-  gap: 8px;
-  height: 30px;
-  max-width: 140px;
+  gap: 5px;
+  height: 28px;
+  max-width: 104px;
   overflow: hidden;
-  padding: 0 12px;
+  padding: 0 8px;
   border: 1px solid var(--rx-border);
   border-radius: 4px;
   color: var(--rx-muted);
@@ -788,7 +966,7 @@ button.secondary {
 
 .chip-suffix {
   height: 20px;
-  padding: 0 6px;
+  padding: 0 5px;
   border: 1px solid var(--rx-border);
   border-radius: 3px;
   color: var(--rx-text);
@@ -806,7 +984,7 @@ button.secondary {
 
 textarea {
   width: 100%;
-  min-height: 64px;
+  min-height: 58px;
   max-height: 150px;
   resize: none;
   padding: 15px 116px 15px 14px;
@@ -816,6 +994,11 @@ textarea {
   color: var(--vscode-input-foreground, var(--rx-text));
   background: var(--vscode-input-background, var(--rx-surface));
   line-height: 1.45;
+}
+
+textarea:disabled {
+  color: var(--rx-muted);
+  opacity: 0.72;
 }
 
 textarea:focus {
@@ -831,7 +1014,7 @@ textarea:focus {
 
 .send-button {
   gap: 8px;
-  height: 38px;
+  height: 34px;
   padding: 0 14px;
   border-radius: 5px;
   color: var(--vscode-button-foreground, #fff);

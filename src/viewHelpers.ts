@@ -51,7 +51,7 @@ export function diffLineClass(line: string): string {
 export function toolIcon(kind: string): string {
   switch (kind) {
     case "read":
-      return "codicon-book";
+      return "codicon-file";
     case "edit":
     case "write":
       return "codicon-edit";

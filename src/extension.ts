@@ -25,6 +25,7 @@ type WorkspaceChatState = {
   running: boolean;
   disconnected: boolean;
   status: string;
+  startError?: string;
   usage?: UsageData;
   surfaces?: SurfaceListResult;
   models?: ModelInfo[];
@@ -32,6 +33,7 @@ type WorkspaceChatState = {
 
 type ChatSnapshot = WorkspaceChatState & {
   workspace: string;
+  hasWorkspace: boolean;
   contextMode: string;
   modelLabel: string;
 };
@@ -66,6 +68,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("reasonix.pickModel", () => provider.pickModel()),
     vscode.commands.registerCommand("reasonix.showOutput", () => output.show()),
     vscode.window.onDidChangeActiveTextEditor(() => provider.refreshActiveWorkspace()),
+    vscode.workspace.onDidChangeWorkspaceFolders((event) => provider.refreshWorkspaceFolders(event)),
   );
   provider.refreshActiveWorkspace();
 }
@@ -78,6 +81,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
   private readonly states = new Map<string, WorkspaceChatState>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly sending = new Set<string>();
+  private selectedWorkspaceKey: string | undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -103,7 +107,38 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
   }
 
   refreshActiveWorkspace(): void {
+    const folder = this.workspaceFolderForActiveEditor();
+    if (folder) {
+      this.selectedWorkspaceKey = workspaceKey(folder);
+    }
     this.postSnapshot();
+  }
+
+  refreshWorkspaceFolders(event?: vscode.WorkspaceFoldersChangeEvent): void {
+    for (const removed of event?.removed ?? []) {
+      this.disposeWorkspace(removed);
+    }
+    const folder = this.currentWorkspaceFolder();
+    if (!folder) {
+      this.selectedWorkspaceKey = undefined;
+    }
+    this.postSnapshot();
+    if (folder && vscode.workspace.getConfiguration("reasonix").get<boolean>("autoStart", false)) {
+      void this.ensureClient(folder);
+    }
+  }
+
+  private disposeWorkspace(folder: vscode.WorkspaceFolder): void {
+    const key = workspaceKey(folder);
+    this.clearPendingApprovals(key);
+    this.clients.get(key)?.dispose();
+    this.clients.delete(key);
+    this.states.delete(key);
+    this.starting.delete(key);
+    this.sending.delete(key);
+    if (this.selectedWorkspaceKey === key) {
+      this.selectedWorkspaceKey = undefined;
+    }
   }
 
   async newSession(): Promise<void> {
@@ -125,6 +160,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     state.running = false;
     state.disconnected = true;
     state.status = "New session";
+    state.startError = undefined;
     state.usage = undefined;
     state.surfaces = undefined;
     await this.context.workspaceState.update(this.sessionStorageKey(folder), undefined);
@@ -203,8 +239,44 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     state.surfaces = undefined;
     state.disconnected = true;
     state.status = `Model: ${picked.model.ref}`;
+    state.startError = undefined;
     await this.context.workspaceState.update(this.sessionStorageKey(folder), undefined);
     this.postSnapshot();
+  }
+
+  async pickWorkspace(): Promise<void> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+      await vscode.commands.executeCommand("workbench.action.files.openFolder");
+      return;
+    }
+    if (folders.length === 1) {
+      this.selectedWorkspaceKey = workspaceKey(folders[0]);
+      this.postSnapshot();
+      if (vscode.workspace.getConfiguration("reasonix").get<boolean>("autoStart", false)) {
+        await this.ensureClient(folders[0]);
+      }
+      return;
+    }
+    const current = this.currentWorkspaceFolder();
+    const currentKey = current ? workspaceKey(current) : undefined;
+    const picked = await vscode.window.showQuickPick(
+      folders.map((folder) => ({
+        label: folder.name,
+        description: workspaceKey(folder) === currentKey ? "current" : undefined,
+        detail: folder.uri.fsPath,
+        folder,
+      })),
+      { title: "Reasonix workspace", placeHolder: "Choose which project Reasonix should use" },
+    );
+    if (!picked) {
+      return;
+    }
+    this.selectedWorkspaceKey = workspaceKey(picked.folder);
+    this.postSnapshot();
+    if (vscode.workspace.getConfiguration("reasonix").get<boolean>("autoStart", false)) {
+      await this.ensureClient(picked.folder);
+    }
   }
 
   private async handleWebviewMessage(raw: unknown): Promise<void> {
@@ -230,6 +302,18 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
         }
         return;
       }
+      case "openFolder":
+        await vscode.commands.executeCommand("workbench.action.files.openFolder");
+        return;
+      case "pickWorkspace":
+        await this.pickWorkspace();
+        return;
+      case "openSettings":
+        await vscode.commands.executeCommand("workbench.action.openSettings", "reasonix.binaryPath");
+        return;
+      case "showOutput":
+        this.output.show();
+        return;
       case "approvalDecision":
         this.resolveApproval(message.id, message.optionId);
         return;
@@ -336,11 +420,16 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
 
   private async startClient(folder: vscode.WorkspaceFolder): Promise<AcpClient | undefined> {
     const key = workspaceKey(folder);
+    const state = this.stateFor(folder);
     const binaryPath = await resolveReasonixBinary();
     if (!binaryPath) {
+      state.disconnected = true;
+      state.running = false;
+      state.status = "Start failed";
+      state.startError = "Reasonix CLI was not found. Install it with `npm i -g reasonix` or set reasonix.binaryPath.";
+      this.postSnapshot();
       return undefined;
     }
-    const state = this.stateFor(folder);
     const config = vscode.workspace.getConfiguration("reasonix");
     const model = config.get<string>("model", "");
     const trace = config.get<boolean>("trace", false);
@@ -348,6 +437,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
 
     state.disconnected = false;
     state.status = "Starting";
+    state.startError = undefined;
     this.postSnapshot();
     const client = new AcpClient({
       binaryPath,
@@ -368,6 +458,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
         state.disconnected = true;
         state.running = false;
         state.status = "Disconnected";
+        state.startError = undefined;
         this.postSnapshot();
       },
       onSessionId: (sessionId) => {
@@ -379,6 +470,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       await client.start();
       state.disconnected = false;
       state.status = "Idle";
+      state.startError = undefined;
       await this.refreshStatus(client, folder);
       await this.refreshSurfaces(client, folder);
       this.postSnapshot();
@@ -388,7 +480,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       this.clients.delete(key);
       state.disconnected = true;
       state.status = "Start failed";
-      appendNotice(state.items, `Could not start Reasonix: ${errorMessage(err)}`);
+      state.startError = errorMessage(err);
       this.appendOutput(`Reasonix start failed: ${errorMessage(err)}`, folder);
       this.postSnapshot();
       return undefined;
@@ -532,6 +624,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     const snapshot: ChatSnapshot = {
       ...state,
       workspace: folder?.name ?? "No workspace",
+      hasWorkspace: folder !== undefined,
       contextMode: config.get<string>("includeSelectionMode", "selectionOnly"),
       modelLabel: config.get<string>("model", "") || "Default model",
     };
@@ -570,7 +663,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     </header>
     <section class="console-header">
       <div class="header-left">
-        <button class="select-chip workspace-chip" type="button" tabindex="-1">
+        <button id="workspaceChip" class="select-chip workspace-chip" data-command="pickWorkspace" type="button">
           <span class="codicon codicon-folder"></span>
           <span id="workspaceName" class="workspace-name"></span>
           <span class="codicon codicon-chevron-down"></span>
@@ -613,14 +706,24 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
   }
 
   private currentWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
-    const editor = vscode.window.activeTextEditor;
-    if (editor) {
-      const folder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
-      if (folder) {
-        return folder;
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (this.selectedWorkspaceKey) {
+      const selected = folders.find((folder) => workspaceKey(folder) === this.selectedWorkspaceKey);
+      if (selected) {
+        return selected;
       }
+      this.selectedWorkspaceKey = undefined;
     }
-    return vscode.workspace.workspaceFolders?.[0];
+    const active = this.workspaceFolderForActiveEditor();
+    if (active) {
+      return active;
+    }
+    return folders[0];
+  }
+
+  private workspaceFolderForActiveEditor(): vscode.WorkspaceFolder | undefined {
+    const editor = vscode.window.activeTextEditor;
+    return editor ? vscode.workspace.getWorkspaceFolder(editor.document.uri) : undefined;
   }
 
   private stateFor(folder: vscode.WorkspaceFolder): WorkspaceChatState {
@@ -644,6 +747,11 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       return;
     }
     const state = this.stateFor(folder);
+    if (state.startError) {
+      this.statusBar.text = "$(warning) Reasonix: Start failed";
+      this.statusBar.tooltip = `Reasonix ${folder.name}\nStart failed\n${state.startError}`;
+      return;
+    }
     const usage = state.usage;
     const denom = usage ? usage.sessionCacheHitTokens + usage.sessionCacheMissTokens : 0;
     const hitRate = usage && denom > 0 ? Math.round((usage.sessionCacheHitTokens / denom) * 100) : undefined;

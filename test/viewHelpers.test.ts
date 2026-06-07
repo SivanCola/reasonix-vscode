@@ -60,7 +60,7 @@ test("diffLineClass classifies unified diff lines", () => {
 });
 
 test("toolIcon maps kind to codicon class", () => {
-  assert.equal(toolIcon("read"), "codicon-book");
+  assert.equal(toolIcon("read"), "codicon-file");
   assert.equal(toolIcon("edit"), "codicon-edit");
   assert.equal(toolIcon("write"), "codicon-edit");
   assert.equal(toolIcon("search"), "codicon-search");
