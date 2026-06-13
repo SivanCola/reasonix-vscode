@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- Moved the Marketplace/Open VSX publishing namespace to `SivanLiu`.
+
 ## 0.1.0
 
 - Refined the Reasonix chat UI with the compact Reasonix/Cline-inspired layout, bilingual interface controls, streamlined mode/model controls, and a dedicated settings entry.

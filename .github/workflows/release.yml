@@ -183,7 +183,7 @@ jobs:
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         shell: bash
-        run: npx --yes ovsx create-namespace SivanCola --pat "$OVSX_PAT" || true
+        run: npx --yes ovsx create-namespace SivanLiu --pat "$OVSX_PAT" || true
 
       - name: Publish VSIX
         if: steps.open-vsx-token.outputs.present == 'true'
