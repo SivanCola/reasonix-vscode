@@ -178,6 +178,13 @@ jobs:
             echo "OVSX_PAT is not configured; skipping Open VSX publish."
           fi
 
+      - name: Ensure Open VSX namespace
+        if: steps.open-vsx-token.outputs.present == 'true'
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        shell: bash
+        run: npx --yes ovsx create-namespace SivanCola --pat "$OVSX_PAT" || true
+
       - name: Publish VSIX
         if: steps.open-vsx-token.outputs.present == 'true'
         env:

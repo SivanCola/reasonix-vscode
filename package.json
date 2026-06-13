@@ -1,5 +1,5 @@
 {
-  "name": "reasonix-vscode",
+  "name": "reasonix-agent",
   "displayName": "Reasonix",
   "description": "Cache-first Reasonix coding agent integration for VS Code.",
   "version": "0.1.0",

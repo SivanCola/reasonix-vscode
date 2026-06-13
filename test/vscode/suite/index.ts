@@ -14,7 +14,7 @@ export async function run(): Promise<void> {
   const folder = await waitForWorkspace();
   assert.equal(path.resolve(folder.uri.fsPath), path.resolve(workspacePath));
 
-  const extension = vscode.extensions.getExtension("SivanCola.reasonix-vscode");
+  const extension = vscode.extensions.getExtension("SivanCola.reasonix-agent");
   assert.ok(extension);
   await extension.activate();
   await waitForCommand("reasonix.newSession");
