@@ -12,7 +12,6 @@ import type {
   SessionPromptResult,
   SessionStatusResult,
   SessionUpdateParams,
-  SurfaceListResult,
 } from "./acpTypes";
 
 export type AcpOutput = {
@@ -153,10 +152,6 @@ export class AcpClient {
 
   async setEffort(modelRef: string, level: string): Promise<EffortSetResult> {
     return await this.requirePeer().sendRequest<EffortSetResult>("effort/set", { modelRef, level });
-  }
-
-  async listSurfaces(): Promise<SurfaceListResult> {
-    return await this.requirePeer().sendRequest<SurfaceListResult>("surface/list", { sessionId: this.requireSession() });
   }
 
   dispose(): void {

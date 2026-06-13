@@ -5,17 +5,19 @@ import * as vscode from "vscode";
 import { AcpClient } from "./acpClient";
 import type {
   ChangePreview,
+  ModelListResult,
   ModelInfo,
   PermissionRequestParams,
   PermissionRequestResult,
   SessionUpdateParams,
-  SurfaceListResult,
   UsageData,
 } from "./acpTypes";
 import { appendApproval, appendNotice, appendUserMessage, applySessionUpdate, resolveApproval as resolveApprovalItem, type ChatItem } from "./chatState";
 import { buildEditorContext, buildEditorContextInfo, configuredSelectionMode, type IncludeSelectionMode } from "./editorContext";
 import { DiffPreviewProvider } from "./preview";
+import { appendFileMentions } from "./resourceMentions";
 import { redactLocalPaths } from "./sanitize";
+import { expandSlashCommand } from "./slashCommands";
 import { parseWebviewMessage } from "./webviewProtocol";
 
 const execFileAsync = promisify(execFile);
@@ -29,17 +31,19 @@ type WorkspaceChatState = {
   sessionId?: string;
   sessionTitle?: string;
   usage?: UsageData;
-  surfaces?: SurfaceListResult;
   models?: ModelInfo[];
+  mcp?: McpSnapshot;
+  toolApprovalMode?: ToolApprovalMode;
 };
 
 type ChatSnapshot = WorkspaceChatState & {
   workspace: string;
   contextMode: string;
-  contextSummary?: string;
   modelLabel: string;
   cacheLabel?: string;
   locale: string;
+  uiLanguage: UiLanguage;
+  settings: ReasonixSettings;
   sessions: SessionSummary[];
 };
 
@@ -47,6 +51,27 @@ type SessionSummary = {
   id: string;
   title: string;
   updatedAt: number;
+};
+
+type UiLanguage = "auto" | "en" | "zh-CN";
+type SettingKey = "binaryPath" | "model" | "uiLanguage" | "autoStart" | "trace" | "includeSelectionMode";
+type CollaborationMode = "normal" | "plan" | "goal";
+type TokenMode = "standard" | "economy";
+type ToolApprovalMode = "ask" | "auto" | "yolo";
+
+type McpSnapshot = {
+  connected: string[];
+  configured: string[];
+  disconnected: string[];
+};
+
+type ReasonixSettings = {
+  binaryPath: string;
+  model: string;
+  uiLanguage: UiLanguage;
+  autoStart: boolean;
+  trace: boolean;
+  includeSelectionMode: IncludeSelectionMode;
 };
 
 type PendingApproval = {
@@ -77,10 +102,37 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("reasonix.sendSelection", () => provider.sendSelection()),
     vscode.commands.registerCommand("reasonix.cancelTurn", () => provider.cancelTurn()),
     vscode.commands.registerCommand("reasonix.pickModel", () => provider.pickModel()),
+    vscode.commands.registerCommand("reasonix.pickUiLanguage", () => provider.pickUiLanguage()),
+    vscode.commands.registerCommand("reasonix.openSettings", () => provider.openSettings()),
     vscode.commands.registerCommand("reasonix.showOutput", () => output.show()),
     vscode.window.onDidChangeActiveTextEditor(() => provider.refreshActiveWorkspace()),
     vscode.window.onDidChangeTextEditorSelection(() => provider.refreshActiveWorkspace()),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (
+        event.affectsConfiguration("reasonix.uiLanguage") ||
+        event.affectsConfiguration("reasonix.includeSelectionMode") ||
+        event.affectsConfiguration("reasonix.model") ||
+        event.affectsConfiguration("reasonix.binaryPath") ||
+        event.affectsConfiguration("reasonix.autoStart") ||
+        event.affectsConfiguration("reasonix.trace")
+      ) {
+        provider.refreshActiveWorkspace();
+      }
+    }),
   );
+  if (process.env.REASONIX_TEST_COMMANDS === "1") {
+    context.subscriptions.push(
+      vscode.commands.registerCommand("reasonix.test.sendPrompt", async (text: unknown, toolApprovalMode: unknown) => {
+        await provider.testSendPrompt(
+          typeof text === "string" ? text : "",
+          toolApprovalMode === "auto" || toolApprovalMode === "yolo" ? toolApprovalMode : "ask",
+        );
+      }),
+      vscode.commands.registerCommand("reasonix.test.webviewMessage", async (message: unknown) => {
+        await provider.testWebviewMessage(message);
+      }),
+    );
+  }
   provider.refreshActiveWorkspace();
 }
 
@@ -142,7 +194,6 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     state.sessionId = undefined;
     state.sessionTitle = undefined;
     state.usage = undefined;
-    state.surfaces = undefined;
     await this.context.workspaceState.update(this.sessionStorageKey(folder), undefined);
     this.postSnapshot();
     await this.ensureClient(folder);
@@ -184,7 +235,21 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     if (!client) {
       return;
     }
-    const models = await client.listModels();
+    let models: ModelListResult;
+    try {
+      models = await client.listModels();
+    } catch (err) {
+      const message = `The active Reasonix ACP backend does not expose model switching yet. Chat will continue with the configured default model.`;
+      state.status = "Model list unavailable";
+      this.appendOutput(`Reasonix model list unavailable: ${errorMessage(err)}`, folder);
+      this.postSnapshot();
+      void vscode.window.showInformationMessage(message, "Open Settings").then((action) => {
+        if (action === "Open Settings") {
+          void vscode.commands.executeCommand("workbench.action.openSettings", "reasonix.model");
+        }
+      });
+      return;
+    }
     state.models = models.models;
     const picked = await vscode.window.showQuickPick(
       models.models.map((model) => ({
@@ -208,8 +273,13 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
         placeHolder: picked.model.effort ?? picked.model.defaultEffort ?? "auto",
       });
       if (effort) {
-        await client.setEffort(picked.model.ref, effort);
-        selectedEffort = effort;
+        try {
+          await client.setEffort(picked.model.ref, effort);
+          selectedEffort = effort;
+        } catch (err) {
+          this.appendOutput(`Reasonix effort update failed: ${errorMessage(err)}`, folder);
+          void vscode.window.showWarningMessage("Reasonix could not update the effort level for this backend. The selected model will still be used.");
+        }
       }
     }
     state.models = models.models.map((model) => ({
@@ -223,11 +293,46 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     this.clients.delete(workspaceKey(folder));
     state.items = [];
     state.usage = undefined;
-    state.surfaces = undefined;
     state.disconnected = true;
     state.status = `Model: ${picked.model.ref}`;
     await this.context.workspaceState.update(this.sessionStorageKey(folder), undefined);
     this.postSnapshot();
+  }
+
+  async pickUiLanguage(): Promise<void> {
+    const current = configuredUiLanguage();
+    const picked = await vscode.window.showQuickPick(
+      [
+        { label: "Auto", description: "Follow VS Code", value: "auto" satisfies UiLanguage },
+        { label: "English", description: "Reasonix UI", value: "en" satisfies UiLanguage },
+        { label: "简体中文", description: "Reasonix 界面", value: "zh-CN" satisfies UiLanguage },
+      ],
+      {
+        title: "Reasonix UI Language",
+        placeHolder: current,
+      },
+    );
+    if (!picked) {
+      return;
+    }
+    await vscode.workspace.getConfiguration("reasonix").update("uiLanguage", picked.value, vscode.ConfigurationTarget.Global);
+    this.postSnapshot();
+  }
+
+  async openSettings(): Promise<void> {
+    await vscode.commands.executeCommand("workbench.view.extension.reasonix");
+    await vscode.commands.executeCommand("reasonix.chat.focus");
+    this.postSnapshot();
+    void this.view?.webview.postMessage({ type: "openSettings" });
+  }
+
+  async testSendPrompt(text: string, toolApprovalMode: ToolApprovalMode): Promise<void> {
+    const expanded = expandSlashCommand(text);
+    await this.sendPrompt(promptWithComposerModes(expanded.prompt, "normal", "standard"), false, toolApprovalMode);
+  }
+
+  async testWebviewMessage(message: unknown): Promise<void> {
+    await this.handleWebviewMessage(message);
   }
 
   private async handleWebviewMessage(raw: unknown): Promise<void> {
@@ -238,7 +343,16 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     }
     switch (message.command) {
       case "sendPrompt":
-        await this.sendPrompt(message.text, true);
+        const expanded = expandSlashCommand(message.text);
+        await this.sendPrompt(
+          promptWithComposerModes(
+            expanded.prompt,
+            message.collaborationMode ?? "normal",
+            message.tokenMode ?? "standard",
+          ),
+          true,
+          message.toolApprovalMode ?? "ask",
+        );
         return;
       case "cancel":
         this.cancelTurn();
@@ -246,18 +360,20 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       case "newSession":
         await this.newSession();
         return;
-      case "insertSelection": {
-        const ctx = buildEditorContext("nearby");
-        if (ctx) {
-          void this.view?.webview.postMessage({ type: "insertText", text: ctx });
-        }
-        return;
-      }
       case "setContextMode":
         await this.setContextMode(message.mode);
         return;
       case "pickModel":
         await this.pickModel();
+        return;
+      case "pickUiLanguage":
+        await this.pickUiLanguage();
+        return;
+      case "openNativeSettings":
+        await vscode.commands.executeCommand("workbench.action.openSettings", "reasonix");
+        return;
+      case "updateSetting":
+        await this.updateSetting(message.key, message.value);
         return;
       case "showOutput":
         this.output.show();
@@ -302,6 +418,45 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     this.postSnapshot();
   }
 
+  private async updateSetting(key: SettingKey, value: string | boolean): Promise<void> {
+    const config = vscode.workspace.getConfiguration("reasonix");
+    switch (key) {
+      case "binaryPath":
+        if (typeof value === "string") {
+          await config.update("binaryPath", value.trim(), vscode.ConfigurationTarget.Global);
+        }
+        break;
+      case "model":
+        if (typeof value === "string") {
+          await config.update("model", value.trim(), vscode.ConfigurationTarget.Workspace);
+        }
+        break;
+      case "uiLanguage":
+        if (value === "auto" || value === "en" || value === "zh-CN") {
+          await config.update("uiLanguage", value, vscode.ConfigurationTarget.Global);
+        }
+        break;
+      case "autoStart":
+        if (typeof value === "boolean") {
+          await config.update("autoStart", value, vscode.ConfigurationTarget.Workspace);
+        }
+        break;
+      case "trace":
+        if (typeof value === "boolean") {
+          await config.update("trace", value, vscode.ConfigurationTarget.Workspace);
+        }
+        break;
+      case "includeSelectionMode":
+        if (value === "off" || value === "selectionOnly" || value === "nearby") {
+          await config.update("includeSelectionMode", value, vscode.ConfigurationTarget.Workspace);
+        }
+        break;
+      default:
+        assertNever(key);
+    }
+    this.postSnapshot();
+  }
+
   private async loadSession(sessionId: string): Promise<void> {
     const folder = this.currentWorkspaceFolder();
     if (!folder) {
@@ -328,7 +483,6 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     state.sessionId = sessionId;
     state.sessionTitle = entry?.title;
     state.usage = undefined;
-    state.surfaces = undefined;
     await this.context.workspaceState.update(this.sessionStorageKey(folder), sessionId);
     this.postSnapshot();
     await this.ensureClient(folder);
@@ -446,7 +600,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     return item?.type === "tool" || item?.type === "approval" ? item.preview : undefined;
   }
 
-  private async sendPrompt(text: string, appendContext: boolean): Promise<void> {
+  private async sendPrompt(text: string, appendContext: boolean, toolApprovalMode: ToolApprovalMode = "ask"): Promise<void> {
     const folder = this.currentWorkspaceFolder();
     if (!folder) {
       void vscode.window.showErrorMessage("Open a workspace folder before starting Reasonix.");
@@ -459,15 +613,21 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.sending.add(key);
+    state.toolApprovalMode = toolApprovalMode;
     try {
       const client = await this.ensureClient(folder);
       if (!client) {
         return;
       }
 
-      const prompt = appendContext ? await this.promptWithConfirmedContext(trimmed) : trimmed;
+      let prompt = appendContext ? await this.promptWithConfirmedContext(trimmed) : trimmed;
       if (!prompt) {
         return;
+      }
+      const withMentions = await appendFileMentions(prompt, folder.uri.fsPath);
+      prompt = withMentions.prompt;
+      if (withMentions.mentions.length > 0) {
+        this.appendOutput(`Attached ${withMentions.mentions.length} @ resource mention(s): ${withMentions.mentions.map((mention) => mention.relativePath).join(", ")}`, folder);
       }
       appendUserMessage(state.items, trimmed);
       await this.updateCurrentSessionTitle(folder, trimmed);
@@ -493,6 +653,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       }
     } finally {
       this.sending.delete(key);
+      state.toolApprovalMode = "ask";
     }
   }
 
@@ -582,7 +743,6 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       state.disconnected = false;
       state.status = "Idle";
       await this.refreshStatus(client, folder);
-      await this.refreshSurfaces(client, folder);
       this.postSnapshot();
       return client;
     } catch (err) {
@@ -631,6 +791,12 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
 
   private async handlePermissionRequest(folder: vscode.WorkspaceFolder, params: PermissionRequestParams): Promise<PermissionRequestResult> {
     const state = this.stateFor(folder);
+    const autoResult = this.autoPermissionResult(params, state.toolApprovalMode ?? "ask");
+    if (autoResult) {
+      appendNotice(state.items, `${permissionModeNotice(state.toolApprovalMode ?? "ask")}: ${params.toolCall.title ?? "tool"}`);
+      this.postSnapshot();
+      return autoResult;
+    }
     appendApproval(state.items, params);
     state.status = "Waiting for approval";
     this.postSnapshot();
@@ -649,6 +815,14 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     return await new Promise<PermissionRequestResult>((resolve) => {
       this.pendingApprovals.set(params.toolCall.toolCallId, { stateKey: workspaceKey(folder), resolve, options: params.options });
     });
+  }
+
+  private autoPermissionResult(params: PermissionRequestParams, mode: ToolApprovalMode): PermissionRequestResult | undefined {
+    if (mode === "ask") {
+      return undefined;
+    }
+    const option = params.options.find((candidate) => candidate.kind === "allow_once");
+    return option ? { outcome: { outcome: "selected", optionId: option.optionId } } : undefined;
   }
 
   private async modalPermission(params: PermissionRequestParams): Promise<PermissionRequestResult> {
@@ -706,17 +880,14 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       const status = await client.status();
       const state = this.stateFor(folder);
       state.usage = status.lastUsage ?? state.usage;
+      state.mcp = {
+        connected: status.connectedMcp ?? [],
+        configured: status.configuredMcp ?? [],
+        disconnected: status.disconnectedMcp ?? [],
+      };
       this.updateStatusBar(folder);
     } catch {
       // Older ACP agents may not expose session/status.
-    }
-  }
-
-  private async refreshSurfaces(client: AcpClient, folder: vscode.WorkspaceFolder): Promise<void> {
-    try {
-      this.stateFor(folder).surfaces = await client.listSurfaces();
-    } catch {
-      // Surface metadata is optional.
     }
   }
 
@@ -724,15 +895,15 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     const folder = this.currentWorkspaceFolder();
     const state = folder ? this.stateFor(folder) : emptyState();
     const contextMode = configuredSelectionMode();
-    const contextInfo = buildEditorContextInfo(contextMode);
     const snapshot: ChatSnapshot = {
       ...state,
       workspace: folder?.name ?? "No workspace",
       contextMode,
-      contextSummary: contextInfo?.summary,
       modelLabel: this.modelLabel(state),
       cacheLabel: state.usage ? cacheBrief(state.usage) : undefined,
-      locale: vscode.env.language,
+      locale: effectiveUiLocale(),
+      uiLanguage: configuredUiLanguage(),
+      settings: currentSettings(),
       sessions: folder ? this.sessionHistory(folder) : [],
     };
     this.updateStatusBar(folder);
@@ -766,36 +937,58 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="shell">
-    <header class="toolbar">
-      <div class="status-cluster">
-        <span id="statusDot" class="status-dot"></span>
-        <div class="status-copy">
-          <div id="status" class="status">Idle</div>
-          <div id="workspaceName" class="workspace-name"></div>
-          <div id="toolbarMeta" class="toolbar-meta"></div>
+    <header class="topbar">
+      <div class="brand-stack">
+        <div class="brand-title">REASONIX</div>
+        <div class="brand-meta">
+          <span id="statusDot" class="status-dot"></span>
+          <span id="status" class="status">Idle</span>
+          <span id="workspaceName" class="workspace-name"></span>
+          <button id="modelButton" class="top-model-chip" title="Pick model and effort" aria-label="Pick model and effort" type="button">Model</button>
+          <span id="toolbarMeta" class="toolbar-meta"></span>
         </div>
       </div>
-      <div class="toolbar-actions">
-        <button id="sessionMenu" class="toolbar-button" title="Recent sessions" aria-label="Recent sessions" type="button">Sessions</button>
-        <button id="newSession" class="toolbar-button" title="New session" aria-label="New session" type="button">New</button>
-        <button id="modelButton" class="toolbar-button" title="Pick model and effort" aria-label="Pick model and effort" type="button">Model</button>
-        <button id="outputButton" class="icon-button" title="Show output" aria-label="Show output" type="button">Logs</button>
+      <div id="chatToolbarActions" class="top-actions">
+        <button id="newSession" class="icon-button" title="New session" aria-label="New session" type="button">+</button>
+        <button id="sessionMenu" class="icon-button" title="Recent sessions" aria-label="Recent sessions" type="button">Sessions</button>
+        <button id="settingsButton" class="icon-button" title="Open settings" aria-label="Open settings" type="button">Settings</button>
+      </div>
+      <div id="settingsToolbarActions" class="top-actions settings-toolbar-actions" hidden>
+        <span id="settingsModeTitle" class="settings-mode-title">Settings</span>
+        <button id="settingsBackButton" class="primary-button" title="Done" aria-label="Done" type="button">Done</button>
       </div>
       <div id="sessionPopover" class="popover session-popover" hidden></div>
     </header>
-    <main id="transcript" class="transcript"></main>
+    <main class="content">
+      <div id="transcript" class="transcript"></div>
+      <div id="settingsView" class="settings-view" hidden></div>
+    </main>
     <form id="composer" class="composer">
-      <div class="context-row">
-        <button id="contextModeButton" class="context-pill" type="button"></button>
-        <span id="contextSummary" class="context-summary"></span>
-        <button id="insertSelection" class="context-action" title="Insert editor context" aria-label="Insert editor context" type="button">Add</button>
-        <div id="contextMenu" class="popover context-menu" hidden></div>
-      </div>
       <div class="input-wrap">
-        <textarea id="prompt" rows="3" placeholder="Message Reasonix"></textarea>
-        <button id="send" class="send-button" type="submit">Send</button>
+        <textarea id="prompt" rows="3" placeholder="Type your task here..."></textarea>
+        <div id="composerHint" class="composer-hint">Type @ for context, / for slash command...</div>
+        <button id="send" class="send-button" type="submit" aria-label="Send">↑</button>
       </div>
-      <div id="surfaceBar" class="surface-bar"></div>
+      <div class="composer-footer">
+        <div class="collaboration-control">
+          <button id="collaborationButton" class="footer-icon tune" title="Collaboration modes" aria-label="Collaboration modes" type="button">☷</button>
+          <div id="collaborationMenu" class="popover collaboration-menu" hidden></div>
+        </div>
+        <div class="controls-control">
+          <button id="controlSummaryButton" class="control-summary" type="button"></button>
+          <div id="controlsMenu" class="popover controls-menu" hidden>
+            <div class="controls-section">
+              <div id="controlsApprovalLabel" class="controls-label">Tool approvals</div>
+              <div id="approvalModebar" class="composer-modebar composer-modebar--approval" data-mode="ask" title="Tool approval mode">
+                <span class="composer-modebar__thumb" aria-hidden="true"></span>
+                <button id="approvalAsk" class="composer-modebar__item" type="button" data-tool-approval-mode="ask">询问</button>
+                <button id="approvalAuto" class="composer-modebar__item" type="button" data-tool-approval-mode="auto">自动</button>
+                <button id="approvalYolo" class="composer-modebar__item" type="button" data-tool-approval-mode="yolo">Yolo</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </form>
   </div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
@@ -911,7 +1104,30 @@ function workspaceKey(folder: vscode.WorkspaceFolder): string {
 }
 
 function emptyState(): WorkspaceChatState {
-  return { items: [], running: false, disconnected: true, status: "Idle" };
+  return { items: [], running: false, disconnected: true, status: "Idle", mcp: { connected: [], configured: [], disconnected: [] } };
+}
+
+function currentSettings(): ReasonixSettings {
+  const config = vscode.workspace.getConfiguration("reasonix");
+  const includeSelectionMode = configuredSelectionMode();
+  return {
+    binaryPath: config.get<string>("binaryPath", ""),
+    model: config.get<string>("model", ""),
+    uiLanguage: configuredUiLanguage(),
+    autoStart: config.get<boolean>("autoStart", false),
+    trace: config.get<boolean>("trace", false),
+    includeSelectionMode,
+  };
+}
+
+function configuredUiLanguage(): UiLanguage {
+  const value = vscode.workspace.getConfiguration("reasonix").get<string>("uiLanguage", "auto");
+  return value === "en" || value === "zh-CN" || value === "auto" ? value : "auto";
+}
+
+function effectiveUiLocale(): string {
+  const language = configuredUiLanguage();
+  return language === "auto" ? vscode.env.language : language;
 }
 
 function cacheBrief(usage: UsageData): string | undefined {
@@ -931,6 +1147,30 @@ function titleFromPrompt(prompt: string): string {
     return "New session";
   }
   return compact.length > 58 ? `${compact.slice(0, 55)}...` : compact;
+}
+
+function promptWithComposerModes(prompt: string, collaborationMode: CollaborationMode, tokenMode: TokenMode): string {
+  const prefixes: string[] = [];
+  if (collaborationMode === "plan") {
+    prefixes.push("Plan mode: analyze the request first, propose a concise implementation plan, and avoid changing files or running destructive commands unless the user explicitly asks to proceed.");
+  } else if (collaborationMode === "goal") {
+    prefixes.push("Goal mode: treat this as a concrete goal. Keep working toward completion, stop when blocked, and call out the next required user decision clearly.");
+  }
+  if (tokenMode === "economy") {
+    prefixes.push("Token economy mode: keep the initial approach lean, avoid loading broad context unless needed, and prefer focused reads/searches before expanding scope.");
+  }
+  return prefixes.length === 0 ? prompt : [...prefixes, "", prompt].join("\n");
+}
+
+function permissionModeNotice(mode: ToolApprovalMode): string {
+  switch (mode) {
+    case "ask":
+      return "Approval requested";
+    case "auto":
+      return "Auto-approved";
+    case "yolo":
+      return "Yolo auto-approved";
+  }
 }
 
 function isSessionSummary(value: unknown): value is SessionSummary {

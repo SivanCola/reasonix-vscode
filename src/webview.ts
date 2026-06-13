@@ -1,4 +1,4 @@
-import type { ChangePreview, SurfaceListResult, UsageData } from "./acpTypes";
+import type { ChangePreview, UsageData } from "./acpTypes";
 import type { ChatItem } from "./chatState";
 import { shouldSubmitPromptOnKeydown } from "./keyboard";
 import type { HostToWebviewMessage } from "./webviewProtocol";
@@ -10,11 +10,32 @@ declare function acquireVsCodeApi(): {
 };
 
 type IncludeSelectionMode = "off" | "selectionOnly" | "nearby";
+type UiLanguage = "auto" | "en" | "zh-CN";
+type SettingKey = "binaryPath" | "model" | "uiLanguage" | "autoStart" | "trace" | "includeSelectionMode";
+type CollaborationMode = "normal" | "plan" | "goal";
+type TokenMode = "standard" | "economy";
+type ToolApprovalMode = "ask" | "auto" | "yolo";
+type SettingsTab = "connection" | "interface" | "behavior";
+
+type SettingsSnapshot = {
+  binaryPath: string;
+  model: string;
+  uiLanguage: UiLanguage;
+  autoStart: boolean;
+  trace: boolean;
+  includeSelectionMode: IncludeSelectionMode;
+};
 
 type SessionSummary = {
   id: string;
   title: string;
   updatedAt: number;
+};
+
+type McpSnapshot = {
+  connected: string[];
+  configured: string[];
+  disconnected: string[];
 };
 
 type Snapshot = {
@@ -24,41 +45,54 @@ type Snapshot = {
   status: string;
   workspace: string;
   contextMode: IncludeSelectionMode;
-  contextSummary?: string;
   usage?: UsageData;
-  surfaces?: SurfaceListResult;
   modelLabel: string;
   cacheLabel?: string;
   locale: string;
+  uiLanguage: UiLanguage;
+  settings: SettingsSnapshot;
   sessionId?: string;
   sessions: SessionSummary[];
+  mcp: McpSnapshot;
 };
 
 const vscode = acquireVsCodeApi();
 const transcript = mustElement("transcript");
+const settingsView = mustElement("settingsView");
 const prompt = mustElement("prompt") as HTMLTextAreaElement;
 const status = mustElement("status");
 const statusDot = mustElement("statusDot");
 const workspaceName = mustElement("workspaceName");
 const toolbarMeta = mustElement("toolbarMeta");
 const send = mustElement("send") as HTMLButtonElement;
+const collaborationButton = mustElement("collaborationButton") as HTMLButtonElement;
+const collaborationMenu = mustElement("collaborationMenu");
+const controlSummaryButton = mustElement("controlSummaryButton") as HTMLButtonElement;
+const controlsMenu = mustElement("controlsMenu");
+const controlsApprovalLabel = mustElement("controlsApprovalLabel");
+const approvalModebar = mustElement("approvalModebar");
+const composerHint = mustElement("composerHint");
 const newSession = mustElement("newSession") as HTMLButtonElement;
-const insertSelection = mustElement("insertSelection") as HTMLButtonElement;
 const composer = mustElement("composer") as HTMLFormElement;
-const surfaceBar = mustElement("surfaceBar");
-const contextModeButton = mustElement("contextModeButton") as HTMLButtonElement;
-const contextSummary = mustElement("contextSummary");
-const contextMenu = mustElement("contextMenu");
 const sessionMenu = mustElement("sessionMenu") as HTMLButtonElement;
 const sessionPopover = mustElement("sessionPopover");
 const modelButton = mustElement("modelButton") as HTMLButtonElement;
-const outputButton = mustElement("outputButton") as HTMLButtonElement;
+const settingsButton = mustElement("settingsButton") as HTMLButtonElement;
+const chatToolbarActions = mustElement("chatToolbarActions");
+const settingsToolbarActions = mustElement("settingsToolbarActions");
+const settingsBackButton = mustElement("settingsBackButton") as HTMLButtonElement;
+const settingsModeTitle = mustElement("settingsModeTitle");
 
 let snapshot: Snapshot = normalizeSnapshot(vscode.getState());
-let contextMenuOpen = false;
 let sessionMenuOpen = false;
+let collaborationMenuOpen = false;
+let controlsMenuOpen = false;
+let settingsOpen = false;
+let settingsTab: SettingsTab = "connection";
+let collaborationMode: CollaborationMode = "normal";
+let tokenMode: TokenMode = "economy";
+let toolApprovalMode: ToolApprovalMode = "ask";
 let compositionActive = false;
-render(snapshot);
 
 composer.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -86,40 +120,87 @@ prompt.addEventListener("input", () => {
 });
 
 newSession.addEventListener("click", () => vscode.postMessage({ command: "newSession" }));
-insertSelection.addEventListener("click", () => vscode.postMessage({ command: "insertSelection" }));
 modelButton.addEventListener("click", () => vscode.postMessage({ command: "pickModel" }));
-outputButton.addEventListener("click", () => vscode.postMessage({ command: "showOutput" }));
-
-contextModeButton.addEventListener("click", (event) => {
-  event.stopPropagation();
-  contextMenuOpen = !contextMenuOpen;
+settingsButton.addEventListener("click", () => {
+  settingsOpen = true;
+  settingsTab = "connection";
   sessionMenuOpen = false;
+  collaborationMenuOpen = false;
+  controlsMenuOpen = false;
+  render(snapshot);
+});
+settingsBackButton.addEventListener("click", () => {
+  settingsOpen = false;
+  sessionMenuOpen = false;
+  collaborationMenuOpen = false;
+  controlsMenuOpen = false;
+  render(snapshot);
+});
+
+collaborationButton.addEventListener("click", (event) => {
+  event.stopPropagation();
+  collaborationMenuOpen = !collaborationMenuOpen;
+  sessionMenuOpen = false;
+  controlsMenuOpen = false;
   renderMenus(snapshot);
+});
+
+controlSummaryButton.addEventListener("click", (event) => {
+  event.stopPropagation();
+  controlsMenuOpen = !controlsMenuOpen;
+  sessionMenuOpen = false;
+  collaborationMenuOpen = false;
+  renderMenus(snapshot);
+});
+
+controlsMenu.addEventListener("click", (event) => {
+  event.stopPropagation();
 });
 
 sessionMenu.addEventListener("click", (event) => {
   event.stopPropagation();
+  if (settingsOpen) {
+    return;
+  }
   sessionMenuOpen = !sessionMenuOpen;
-  contextMenuOpen = false;
+  collaborationMenuOpen = false;
+  controlsMenuOpen = false;
   renderMenus(snapshot);
 });
 
 document.addEventListener("click", () => {
-  if (!contextMenuOpen && !sessionMenuOpen) {
+  if (!sessionMenuOpen && !collaborationMenuOpen && !controlsMenuOpen) {
     return;
   }
-  contextMenuOpen = false;
   sessionMenuOpen = false;
+  collaborationMenuOpen = false;
+  controlsMenuOpen = false;
   renderMenus(snapshot);
 });
 
-contextMenu.addEventListener("click", (event) => {
+collaborationMenu.addEventListener("click", (event) => {
   event.stopPropagation();
-  const button = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-context-mode]");
-  const mode = button?.dataset.contextMode;
-  if (mode === "off" || mode === "selectionOnly" || mode === "nearby") {
-    contextMenuOpen = false;
-    vscode.postMessage({ command: "setContextMode", mode });
+  const target = event.target as Element | null;
+  const collaboration = target?.closest<HTMLButtonElement>("button[data-collaboration-mode]")?.dataset.collaborationMode;
+  if (isCollaborationMode(collaboration)) {
+    collaborationMode = collaborationMode === collaboration ? "normal" : collaboration;
+    collaborationMenuOpen = false;
+    render(snapshot);
+    return;
+  }
+  const token = target?.closest<HTMLButtonElement>("button[data-token-mode]")?.dataset.tokenMode;
+  if (isTokenMode(token)) {
+    tokenMode = tokenMode === token ? "standard" : token;
+    collaborationMenuOpen = false;
+    render(snapshot);
+  }
+});
+
+approvalModebar.addEventListener("click", (event) => {
+  const mode = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-tool-approval-mode]")?.dataset.toolApprovalMode;
+  if (isToolApprovalMode(mode)) {
+    toolApprovalMode = mode;
+    updateModeUi();
   }
 });
 
@@ -179,7 +260,7 @@ transcript.addEventListener("click", (event) => {
   }
 
   const command = target?.closest<HTMLButtonElement>("button[data-command]")?.dataset.command;
-  if (command === "newSession" || command === "insertSelection") {
+  if (command === "newSession") {
     vscode.postMessage({ command });
     return;
   }
@@ -197,12 +278,71 @@ transcript.addEventListener("click", (event) => {
   }
 });
 
-surfaceBar.addEventListener("click", (event) => {
-  const button = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-insert]");
-  if (!button) {
+settingsView.addEventListener("click", (event) => {
+  const target = event.target as Element | null;
+  const tab = target?.closest<HTMLButtonElement>("button[data-settings-tab]")?.dataset.settingsTab;
+  if (isSettingsTab(tab)) {
+    settingsTab = tab;
+    renderSettings(snapshot);
     return;
   }
-  insertAtCursor(button.dataset.insert ?? "");
+
+  const action = target?.closest<HTMLButtonElement>("button[data-settings-action]")?.dataset.settingsAction;
+  if (action === "close") {
+    settingsOpen = false;
+    sessionMenuOpen = false;
+    render(snapshot);
+    return;
+  }
+  if (action === "pickModel") {
+    vscode.postMessage({ command: "pickModel" });
+    return;
+  }
+  if (action === "openNativeSettings") {
+    vscode.postMessage({ command: "openNativeSettings" });
+    return;
+  }
+  if (action === "showOutput") {
+    vscode.postMessage({ command: "showOutput" });
+    return;
+  }
+
+  const save = target?.closest<HTMLButtonElement>("button[data-save-setting]")?.dataset.saveSetting;
+  if (save === "binaryPath" || save === "model") {
+    saveTextSetting(save);
+    return;
+  }
+
+  const option = target?.closest<HTMLButtonElement>("button[data-setting-key][data-setting-value]");
+  const key = option?.dataset.settingKey;
+  const value = option?.dataset.settingValue;
+  if (key === "uiLanguage" && isUiLanguage(value)) {
+    updateSetting(key, value);
+    return;
+  }
+  if (key === "includeSelectionMode" && isContextMode(value)) {
+    updateSetting(key, value);
+  }
+});
+
+settingsView.addEventListener("change", (event) => {
+  const checkbox = (event.target as Element | null)?.closest<HTMLInputElement>("input[type='checkbox'][data-setting-key]");
+  const key = checkbox?.dataset.settingKey;
+  if (checkbox && (key === "autoStart" || key === "trace")) {
+    updateSetting(key, checkbox.checked);
+  }
+});
+
+settingsView.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") {
+    return;
+  }
+  const input = (event.target as Element | null)?.closest<HTMLInputElement>("input[data-text-setting]");
+  const key = input?.dataset.textSetting;
+  if (key === "binaryPath" || key === "model") {
+    event.preventDefault();
+    saveTextSetting(key);
+  }
 });
 
 window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) => {
@@ -213,11 +353,12 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
       vscode.setState(snapshot);
       render(snapshot);
       return;
-    case "insertText":
-      insertAtCursor(message.text);
-      return;
     case "notice":
       appendNotice(message.text);
+      return;
+    case "openSettings":
+      settingsOpen = true;
+      render(snapshot);
       return;
   }
 });
@@ -225,26 +366,49 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
 vscode.postMessage({ command: "stateSnapshot" });
 
 function render(state: Snapshot): void {
-  const shouldStickToBottom = state.running || transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+  const shouldStickToBottom = !settingsOpen && (state.running || transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80);
 
-  status.textContent = state.disconnected ? `${state.status} disconnected` : state.status;
+  status.textContent = state.disconnected ? label("disconnected") : state.status;
   status.title = state.workspace;
   statusDot.className = `status-dot ${state.running ? "running" : state.disconnected ? "disconnected" : "ready"}`;
   workspaceName.textContent = state.workspace;
   workspaceName.title = state.workspace;
   toolbarMeta.textContent = toolbarMetaText(state);
   sessionMenu.textContent = label("sessions");
-  newSession.textContent = label("new");
+  sessionMenu.textContent = "☰";
+  sessionMenu.title = label("sessions");
+  sessionMenu.setAttribute("aria-label", label("sessions"));
+  newSession.textContent = "+";
+  newSession.title = label("new");
+  newSession.setAttribute("aria-label", label("new"));
   modelButton.textContent = shortModelLabel(state.modelLabel);
   modelButton.title = `${label("model")}: ${state.modelLabel}`;
-  outputButton.textContent = label("logs");
-  insertSelection.textContent = label("add");
+  settingsButton.textContent = "⚙";
+  settingsButton.title = label("settings");
+  settingsButton.setAttribute("aria-label", label("settings"));
+  settingsBackButton.textContent = label("done");
+  settingsModeTitle.textContent = label("settings");
+  collaborationButton.title = label("collaborationModes");
+  collaborationButton.setAttribute("aria-label", label("collaborationModes"));
+  controlsApprovalLabel.textContent = label("toolApprovals");
+  controlSummaryButton.setAttribute("aria-label", label("composerControls"));
+  composerHint.textContent = label("composerHint");
   prompt.placeholder = label("placeholder");
   newSession.disabled = state.running;
-  updateContextUi(state);
+  chatToolbarActions.hidden = settingsOpen;
+  settingsToolbarActions.hidden = !settingsOpen;
+  transcript.hidden = settingsOpen;
+  settingsView.hidden = !settingsOpen;
+  composer.hidden = settingsOpen;
+  if (settingsOpen) {
+    sessionMenuOpen = false;
+    collaborationMenuOpen = false;
+    controlsMenuOpen = false;
+  }
   updateSendButton(state);
-  renderSurfaces(state.surfaces);
+  updateModeUi();
   renderMenus(state);
+  renderSettings(state);
 
   transcript.textContent = "";
   if (state.items.length === 0) {
@@ -261,43 +425,104 @@ function render(state: Snapshot): void {
   resizePrompt();
 }
 
-function updateContextUi(state: Snapshot): void {
-  contextModeButton.textContent = `${label("context")}: ${contextModeLabel(state.contextMode)}`;
-  contextModeButton.title = contextModeDetail(state.contextMode);
-  if (state.contextMode === "off") {
-    contextSummary.textContent = label("contextOff");
-  } else {
-    contextSummary.textContent = state.contextSummary ?? label("noContext");
-  }
-}
-
 function updateSendButton(state: Snapshot): void {
-  send.textContent = state.running ? label("stop") : label("send");
+  send.textContent = state.running ? label("stop") : "↑";
   send.title = state.running ? label("stopTurn") : label("sendShortcut");
   send.classList.toggle("danger", state.running);
   send.disabled = !state.running && prompt.value.trim() === "";
 }
 
-function renderMenus(state: Snapshot): void {
-  renderContextMenu(state);
-  renderSessionPopover(state);
+function updateModeUi(): void {
+  approvalModebar.dataset.mode = toolApprovalMode;
+  for (const button of Array.from(approvalModebar.querySelectorAll<HTMLButtonElement>("button[data-tool-approval-mode]"))) {
+    const mode = button.dataset.toolApprovalMode;
+    const selected = mode === toolApprovalMode;
+    button.classList.toggle("composer-modebar__item--active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+    if (mode === "ask") {
+      button.textContent = label("ask");
+      button.title = label("askDetail");
+    } else if (mode === "auto") {
+      button.textContent = label("autoApproval");
+      button.title = label("autoApprovalDetail");
+    } else if (mode === "yolo") {
+      button.textContent = label("yolo");
+      button.title = label("yoloDetail");
+    }
+  }
+  renderControlSummary(snapshot);
 }
 
-function renderContextMenu(state: Snapshot): void {
-  contextMenu.textContent = "";
-  for (const mode of ["selectionOnly", "nearby", "off"] satisfies IncludeSelectionMode[]) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.contextMode = mode;
-    button.className = mode === state.contextMode ? "menu-row selected" : "menu-row";
-    const title = document.createElement("span");
-    title.textContent = contextModeLabel(mode);
-    const detail = document.createElement("small");
-    detail.textContent = contextModeDetail(mode);
-    button.append(title, detail);
-    contextMenu.append(button);
+function renderMenus(state: Snapshot): void {
+  renderSessionPopover(state);
+  renderCollaborationMenu();
+  renderControlsMenu();
+}
+
+function renderControlSummary(state: Snapshot): void {
+  const parts: string[] = [];
+  if (collaborationMode === "plan") {
+    parts.push(label("plan"));
+  } else if (collaborationMode === "goal") {
+    parts.push(label("goal"));
   }
-  contextMenu.hidden = !contextMenuOpen;
+  parts.push(toolApprovalModeLabel(toolApprovalMode));
+  if (tokenMode === "economy") {
+    parts.push(label("tokenEconomyShort"));
+  }
+  controlSummaryButton.textContent = `${parts.join(" · ")} ▾`;
+  controlSummaryButton.title = parts.join(" · ");
+}
+
+function renderCollaborationMenu(): void {
+  collaborationMenu.textContent = "";
+  const title = document.createElement("div");
+  title.className = "collaboration-menu__title";
+  title.textContent = label("collaborationModes");
+  collaborationMenu.append(
+    title,
+    collaborationMenuRow("plan", label("plan"), label("planDetail"), "☰"),
+    collaborationMenuRow("goal", label("goal"), label("goalDetail"), "◎"),
+    tokenMenuRow("economy", label("tokenEconomy"), label("tokenEconomyDetail"), "◜"),
+  );
+  collaborationMenu.hidden = !collaborationMenuOpen;
+}
+
+function renderControlsMenu(): void {
+  controlsMenu.hidden = !controlsMenuOpen;
+}
+
+function collaborationMenuRow(mode: CollaborationMode, titleText: string, detailText: string, iconText: string): HTMLButtonElement {
+  const button = menuToggleRow(titleText, detailText, iconText, collaborationMode === mode);
+  button.dataset.collaborationMode = mode;
+  return button;
+}
+
+function tokenMenuRow(mode: TokenMode, titleText: string, detailText: string, iconText: string): HTMLButtonElement {
+  const button = menuToggleRow(titleText, detailText, iconText, tokenMode === mode);
+  button.dataset.tokenMode = mode;
+  return button;
+}
+
+function menuToggleRow(titleText: string, detailText: string, iconText: string, selected: boolean): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = selected ? "collaboration-menu__row selected" : "collaboration-menu__row";
+  const icon = document.createElement("span");
+  icon.className = "collaboration-menu__icon";
+  icon.textContent = iconText;
+  const copy = document.createElement("span");
+  copy.className = "collaboration-menu__copy";
+  const title = document.createElement("strong");
+  title.textContent = titleText;
+  const detail = document.createElement("small");
+  detail.textContent = detailText;
+  const toggle = document.createElement("span");
+  toggle.className = "collaboration-menu__switch";
+  toggle.setAttribute("aria-hidden", "true");
+  copy.append(title, detail);
+  button.append(icon, copy, toggle);
+  return button;
 }
 
 function renderSessionPopover(state: Snapshot): void {
@@ -322,6 +547,189 @@ function renderSessionPopover(state: Snapshot): void {
     }
   }
   sessionPopover.hidden = !sessionMenuOpen;
+}
+
+function renderSettings(state: Snapshot): void {
+  settingsView.textContent = "";
+  if (!settingsOpen) {
+    return;
+  }
+
+  const shell = document.createElement("section");
+  shell.className = "settings-panel";
+
+  const head = document.createElement("div");
+  head.className = "settings-head";
+  const title = document.createElement("h1");
+  title.textContent = label("settings");
+  head.append(title);
+
+  const layout = document.createElement("div");
+  layout.className = "settings-layout";
+  const rail = document.createElement("nav");
+  rail.className = "settings-rail";
+  rail.append(
+    settingsTabButton("connection", "≡", label("apiConfiguration")),
+    settingsTabButton("interface", "◇", label("interface")),
+    settingsTabButton("behavior", "⚙", label("behavior")),
+  );
+
+  const content = document.createElement("div");
+  content.className = "settings-content";
+  if (settingsTab === "connection") {
+    content.append(
+      settingsSection(
+        label("apiConfiguration"),
+        staticSettingRow(label("apiProvider"), "Reasonix ACP"),
+        staticSettingRow(label("mcpServers"), mcpSummary(state.mcp)),
+        textSettingRow("binaryPath", label("cliPath"), state.settings.binaryPath, label("pathPlaceholder")),
+        textSettingRow("model", label("modelOverride"), state.settings.model, label("modelPlaceholder")),
+        settingsActionRow(settingsActionButton("pickModel", label("pickModel")), settingsActionButton("showOutput", label("logs"))),
+      ),
+    );
+  } else if (settingsTab === "interface") {
+    content.append(
+      settingsSection(
+        label("interface"),
+        segmentedSetting("uiLanguage", state.settings.uiLanguage, [
+          ["auto", label("autoLanguage")],
+          ["en", label("english")],
+          ["zh-CN", label("chinese")],
+        ]),
+        segmentedSetting("includeSelectionMode", state.settings.includeSelectionMode, [
+          ["selectionOnly", label("selection")],
+          ["nearby", label("nearby")],
+          ["off", label("off")],
+        ]),
+      ),
+    );
+  } else {
+    content.append(
+      settingsSection(
+        label("behavior"),
+        toggleSetting("autoStart", label("autoStart"), state.settings.autoStart),
+        toggleSetting("trace", label("trace"), state.settings.trace),
+        staticSettingRow(label("approval"), label("approvalReview")),
+        settingsActionRow(settingsActionButton("openNativeSettings", label("openVsCodeSettings"))),
+      ),
+    );
+  }
+
+  layout.append(rail, content);
+  shell.append(head, layout);
+  settingsView.append(shell);
+}
+
+function settingsTabButton(tab: SettingsTab, iconText: string, titleText: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.dataset.settingsTab = tab;
+  button.className = tab === settingsTab ? "selected" : "";
+  const icon = document.createElement("span");
+  icon.className = "settings-tab-icon";
+  icon.textContent = iconText;
+  const title = document.createElement("span");
+  title.textContent = titleText;
+  button.append(icon, title);
+  return button;
+}
+
+function settingsSection(titleText: string, ...children: HTMLElement[]): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "settings-section";
+  const title = document.createElement("h3");
+  title.textContent = titleText;
+  section.append(title, ...children);
+  return section;
+}
+
+function textSettingRow(key: "binaryPath" | "model", labelText: string, value: string, placeholder: string): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "setting-row";
+  const labelNode = document.createElement("label");
+  labelNode.className = "setting-label";
+  const id = `setting-${key}`;
+  labelNode.htmlFor = id;
+  labelNode.textContent = labelText;
+  const inputRow = document.createElement("div");
+  inputRow.className = "setting-input-row";
+  const input = document.createElement("input");
+  input.id = id;
+  input.dataset.textSetting = key;
+  input.value = value;
+  input.placeholder = placeholder;
+  input.spellcheck = false;
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "micro-button";
+  save.dataset.saveSetting = key;
+  save.textContent = label("save");
+  inputRow.append(input, save);
+  row.append(labelNode, inputRow);
+  return row;
+}
+
+function staticSettingRow(labelText: string, value: string): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "setting-row";
+  const name = document.createElement("div");
+  name.className = "setting-label";
+  name.textContent = labelText;
+  const detail = document.createElement("div");
+  detail.className = "setting-detail";
+  detail.textContent = value;
+  row.append(name, detail);
+  return row;
+}
+
+function segmentedSetting(key: "uiLanguage" | "includeSelectionMode", current: string, options: [string, string][]): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "setting-row";
+  const name = document.createElement("div");
+  name.className = "setting-label";
+  name.textContent = key === "uiLanguage" ? label("language") : label("context");
+  const group = document.createElement("div");
+  group.className = "segmented";
+  for (const [value, text] of options) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.settingKey = key;
+    button.dataset.settingValue = value;
+    button.className = value === current ? "selected" : "";
+    button.textContent = text;
+    group.append(button);
+  }
+  row.append(name, group);
+  return row;
+}
+
+function toggleSetting(key: "autoStart" | "trace", text: string, checked: boolean): HTMLElement {
+  const labelNode = document.createElement("label");
+  labelNode.className = "toggle-row";
+  const copy = document.createElement("span");
+  copy.textContent = text;
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.dataset.settingKey = key;
+  input.checked = checked;
+  labelNode.append(copy, input);
+  return labelNode;
+}
+
+function settingsActionRow(...buttons: HTMLButtonElement[]): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "settings-actions";
+  row.append(...buttons);
+  return row;
+}
+
+function settingsActionButton(action: string, text: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "secondary";
+  button.dataset.settingsAction = action;
+  button.textContent = text;
+  return button;
 }
 
 function renderItem(item: ChatItem, index: number): HTMLElement {
@@ -380,12 +788,15 @@ function renderThought(text: string, index: number): HTMLElement {
 function renderEmptyState(state: Snapshot): HTMLElement {
   const node = document.createElement("section");
   node.className = "empty-state";
+  const mark = document.createElement("div");
+  mark.className = "reasonix-mark";
+  mark.textContent = "R";
   const title = document.createElement("div");
   title.className = "empty-title";
-  title.textContent = state.disconnected ? label("idleTitle") : label("readyTitle");
+  title.textContent = label("whatCanIDo");
   const detail = document.createElement("div");
   detail.className = "empty-detail";
-  detail.textContent = state.workspace;
+  detail.textContent = state.disconnected ? label("idleTitle") : `${label("readyTitle")} · ${state.workspace}`;
   const actions = document.createElement("div");
   actions.className = "empty-actions";
   actions.append(
@@ -394,10 +805,7 @@ function renderEmptyState(state: Snapshot): HTMLElement {
     quickButton("runTests", label("runTests")),
     quickButton("searchRepo", label("searchRepo")),
   );
-  const secondary = document.createElement("div");
-  secondary.className = "empty-actions secondary-row";
-  secondary.append(emptyButton("newSession", label("start")), emptyButton("insertSelection", label("addContext")));
-  node.append(title, detail, actions, secondary);
+  node.append(mark, title, detail, actions);
   return node;
 }
 
@@ -747,33 +1155,16 @@ function codeBlock(code: string, language: string): HTMLElement {
   return node;
 }
 
-function renderSurfaces(surfaces: SurfaceListResult | undefined): void {
-  surfaceBar.textContent = "";
-  const chips = surfaces?.slashCompletions?.slice(0, 8) ?? [];
-  if (chips.length === 0) {
-    surfaceBar.hidden = true;
-    return;
-  }
-  surfaceBar.hidden = false;
-  for (const chip of chips) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "chip";
-    button.dataset.insert = chip.insert;
-    button.title = chip.hint ?? chip.label;
-    button.textContent = chip.label;
-    surfaceBar.append(button);
-  }
+function updateSetting(key: SettingKey, value: string | boolean): void {
+  vscode.postMessage({ command: "updateSetting", key, value });
 }
 
-function insertAtCursor(text: string): void {
-  const before = prompt.value.slice(0, prompt.selectionStart);
-  const after = prompt.value.slice(prompt.selectionEnd);
-  const sep = before.trim() === "" || text.trim() === "" ? "" : "\n\n";
-  prompt.value = before + sep + text + after;
-  prompt.focus();
-  resizePrompt();
-  updateSendButton(snapshot);
+function saveTextSetting(key: "binaryPath" | "model"): void {
+  const input = settingsView.querySelector<HTMLInputElement>(`input[data-text-setting="${key}"]`);
+  if (!input) {
+    return;
+  }
+  updateSetting(key, input.value);
 }
 
 function appendNotice(text: string): void {
@@ -790,7 +1181,7 @@ function submitPrompt(): void {
   if (text === "") {
     return;
   }
-  vscode.postMessage({ command: "sendPrompt", text });
+  vscode.postMessage({ command: "sendPrompt", text, collaborationMode, tokenMode, toolApprovalMode });
   prompt.value = "";
   resizePrompt();
   updateSendButton(snapshot);
@@ -811,7 +1202,17 @@ function emptySnapshot(): Snapshot {
     contextMode: "selectionOnly",
     modelLabel: "Default model",
     locale: "en",
+    uiLanguage: "auto",
+    settings: {
+      binaryPath: "",
+      model: "",
+      uiLanguage: "auto",
+      autoStart: false,
+      trace: false,
+      includeSelectionMode: "selectionOnly",
+    },
     sessions: [],
+    mcp: { connected: [], configured: [], disconnected: [] },
   };
 }
 
@@ -827,23 +1228,57 @@ function normalizeSnapshot(value: unknown): Snapshot {
     status: typeof value.status === "string" ? value.status : "Idle",
     workspace: typeof value.workspace === "string" ? value.workspace : "No workspace",
     contextMode,
-    contextSummary: typeof value.contextSummary === "string" ? value.contextSummary : undefined,
     usage: isRecord(value.usage) ? (value.usage as unknown as UsageData) : undefined,
-    surfaces: isRecord(value.surfaces) ? (value.surfaces as unknown as SurfaceListResult) : undefined,
     modelLabel: typeof value.modelLabel === "string" ? value.modelLabel : "Default model",
     cacheLabel: typeof value.cacheLabel === "string" ? value.cacheLabel : undefined,
     locale: typeof value.locale === "string" ? value.locale : "en",
+    uiLanguage: isUiLanguage(value.uiLanguage) ? value.uiLanguage : "auto",
+    settings: normalizeSettings(value.settings, contextMode, value.uiLanguage),
     sessionId: typeof value.sessionId === "string" ? value.sessionId : undefined,
     sessions: Array.isArray(value.sessions) ? (value.sessions as SessionSummary[]).filter(isSessionSummary) : [],
+    mcp: normalizeMcp(value.mcp),
+  };
+}
+
+function normalizeMcp(value: unknown): McpSnapshot {
+  const record = isRecord(value) ? value : {};
+  return {
+    connected: stringArray(record.connected),
+    configured: stringArray(record.configured),
+    disconnected: stringArray(record.disconnected),
+  };
+}
+
+function normalizeSettings(value: unknown, contextMode: IncludeSelectionMode, uiLanguage: unknown): SettingsSnapshot {
+  const record = isRecord(value) ? value : {};
+  return {
+    binaryPath: typeof record.binaryPath === "string" ? record.binaryPath : "",
+    model: typeof record.model === "string" ? record.model : "",
+    uiLanguage: isUiLanguage(record.uiLanguage) ? record.uiLanguage : isUiLanguage(uiLanguage) ? uiLanguage : "auto",
+    autoStart: record.autoStart === true,
+    trace: record.trace === true,
+    includeSelectionMode: isContextMode(record.includeSelectionMode) ? record.includeSelectionMode : contextMode,
   };
 }
 
 function toolbarMetaText(state: Snapshot): string {
-  const parts = [state.modelLabel];
+  const parts: string[] = [];
   if (state.cacheLabel) {
     parts.push(state.cacheLabel);
   }
+  if (state.mcp.connected.length > 0) {
+    parts.push(`MCP ${state.mcp.connected.length}`);
+  }
   return parts.join(" / ");
+}
+
+function mcpSummary(mcp: McpSnapshot): string {
+  if (mcp.configured.length === 0 && mcp.connected.length === 0) {
+    return label("none");
+  }
+  const connected = mcp.connected.length > 0 ? mcp.connected.join(", ") : label("none");
+  const disconnected = mcp.disconnected.length > 0 ? ` · ${label("disconnected")}: ${mcp.disconnected.join(", ")}` : "";
+  return `${connected}${disconnected}`;
 }
 
 function cacheLabel(hit: number, miss: number): string {
@@ -862,6 +1297,17 @@ function contextModeLabel(mode: IncludeSelectionMode): string {
       return label("nearby");
     case "off":
       return label("off");
+  }
+}
+
+function toolApprovalModeLabel(mode: ToolApprovalMode): string {
+  switch (mode) {
+    case "ask":
+      return label("ask");
+    case "auto":
+      return label("autoApproval");
+    case "yolo":
+      return label("yolo");
   }
 }
 
@@ -949,15 +1395,6 @@ function metric(labelText: string, value: string): HTMLElement {
   return node;
 }
 
-function emptyButton(command: "newSession" | "insertSelection", text: string): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "secondary";
-  button.dataset.command = command;
-  button.textContent = text;
-  return button;
-}
-
 function quickButton(action: "explainFile" | "fixSelection" | "runTests" | "searchRepo", text: string): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -990,10 +1427,11 @@ function firstLine(value: string): string {
 }
 
 function shortModelLabel(value: string): string {
-  if (value === "Default model") {
+  const trimmed = value.trim();
+  if (trimmed === "Default model") {
     return label("model");
   }
-  const compact = value.split("/").at(-1) ?? value;
+  const compact = (trimmed.split("/").at(-1) ?? trimmed).trim();
   return compact.length > 16 ? `${compact.slice(0, 15)}...` : compact;
 }
 
@@ -1040,6 +1478,34 @@ function isSessionSummary(value: unknown): value is SessionSummary {
   return isRecord(value) && typeof value.id === "string" && typeof value.title === "string" && typeof value.updatedAt === "number";
 }
 
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function isUiLanguage(value: unknown): value is UiLanguage {
+  return value === "auto" || value === "en" || value === "zh-CN";
+}
+
+function isContextMode(value: unknown): value is IncludeSelectionMode {
+  return value === "off" || value === "selectionOnly" || value === "nearby";
+}
+
+function isCollaborationMode(value: unknown): value is CollaborationMode {
+  return value === "normal" || value === "plan" || value === "goal";
+}
+
+function isTokenMode(value: unknown): value is TokenMode {
+  return value === "standard" || value === "economy";
+}
+
+function isToolApprovalMode(value: unknown): value is ToolApprovalMode {
+  return value === "ask" || value === "auto" || value === "yolo";
+}
+
+function isSettingsTab(value: unknown): value is SettingsTab {
+  return value === "connection" || value === "interface" || value === "behavior";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1053,22 +1519,40 @@ function mustElement(id: string): HTMLElement {
 }
 
 type LabelKey =
-  | "addContext"
   | "add"
   | "always"
+  | "act"
+  | "apiConfiguration"
+  | "apiProvider"
   | "approval"
+  | "approvalReview"
+  | "ask"
+  | "askDetail"
+  | "autoApproval"
+  | "autoApprovalDetail"
+  | "autoLanguage"
+  | "autoStart"
+  | "backToChat"
+  | "behavior"
   | "cache"
   | "cacheDiagnostics"
   | "cancelled"
   | "code"
   | "completed"
+  | "clickToDisable"
+  | "collaborationModes"
+  | "composerControls"
+  | "connection"
   | "context"
   | "contextOff"
   | "continue"
   | "copied"
   | "copy"
   | "cost"
+  | "disconnected"
+  | "done"
   | "edit"
+  | "english"
   | "execute"
   | "explainFile"
   | "failed"
@@ -1078,13 +1562,20 @@ type LabelKey =
   | "inputTokens"
   | "insert"
   | "justNow"
+  | "language"
   | "logs"
   | "model"
+  | "modelOverride"
+  | "modelPlaceholder"
+  | "mcpServers"
+  | "goal"
+  | "goalDetail"
   | "nearby"
   | "nearbyDetail"
   | "new"
   | "noContext"
   | "noSessions"
+  | "none"
   | "notice"
   | "off"
   | "offDetail"
@@ -1094,6 +1585,11 @@ type LabelKey =
   | "outputTokens"
   | "pending"
   | "placeholder"
+  | "plan"
+  | "planDetail"
+  | "composerHint"
+  | "pathPlaceholder"
+  | "pickModel"
   | "read"
   | "readyTitle"
   | "reasoning"
@@ -1110,33 +1606,65 @@ type LabelKey =
   | "sendShortcut"
   | "session"
   | "sessions"
+  | "settings"
   | "start"
   | "stop"
   | "stopTurn"
   | "thought"
   | "thoughtSummary"
   | "tokens"
+  | "tokenEconomy"
+  | "tokenEconomyDetail"
+  | "tokenEconomyShort"
+  | "toolApprovals"
+  | "trace"
   | "usage"
-  | "user";
+  | "user"
+  | "whatCanIDo"
+  | "yolo"
+  | "yoloDetail"
+  | "chinese"
+  | "cliPath"
+  | "interface"
+  | "openVsCodeSettings"
+  | "save";
 
 const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
   en: {
-    addContext: "Add context",
     add: "Add",
     always: "Always",
+    act: "Act",
+    apiConfiguration: "API Configuration",
+    apiProvider: "API Provider",
     approval: "approval",
+    approvalReview: "Approval: review tool requests",
+    ask: "Ask",
+    askDetail: "Ask before approval-gated tool calls.",
+    autoApproval: "Auto",
+    autoApprovalDetail: "Auto-approve ordinary tool permissions for this turn.",
+    autoLanguage: "Auto",
+    autoStart: "Auto start",
+    backToChat: "Back",
+    behavior: "Behavior",
     cache: "Cache",
     cacheDiagnostics: "Cache diagnostics",
     cancelled: "cancelled",
     code: "code",
     completed: "completed",
+    clickToDisable: "Click to turn off",
+    collaborationModes: "Collaboration modes",
+    composerControls: "Composer controls",
+    connection: "Connection",
     context: "Context",
     contextOff: "No editor context",
     continue: "Continue",
     copied: "Copied",
     copy: "Copy",
     cost: "Cost",
+    disconnected: "Disconnected",
+    done: "Done",
     edit: "edit",
+    english: "English",
     execute: "execute",
     explainFile: "Explain file",
     failed: "failed",
@@ -1146,13 +1674,20 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     inputTokens: "Input",
     insert: "Insert",
     justNow: "now",
+    language: "Language",
     logs: "Logs",
     model: "Model",
+    modelOverride: "Model override",
+    modelPlaceholder: "Default model",
+    mcpServers: "MCP servers",
+    goal: "Goal",
+    goalDetail: "Keep working toward a concrete goal until done or blocked.",
     nearby: "Nearby code",
     nearbyDetail: "Use selected text, or a cursor window when nothing is selected.",
     new: "New",
     noContext: "No active editor context",
     noSessions: "No recent sessions",
+    none: "None",
     notice: "notice",
     off: "Off",
     offDetail: "Send prompts without editor context.",
@@ -1161,7 +1696,12 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     other: "other",
     outputTokens: "Output",
     pending: "pending",
-    placeholder: "Message Reasonix",
+    placeholder: "Message Reasonix...",
+    plan: "Plan",
+    planDetail: "Read first, produce a plan, and wait before side effects.",
+    composerHint: "/ commands · @ files/folders",
+    pathPlaceholder: "Resolve from PATH",
+    pickModel: "Pick model",
     read: "read",
     readyTitle: "Ready",
     reasoning: "Reasoning",
@@ -1178,32 +1718,64 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     sendShortcut: "Send (Enter), newline (Shift+Enter)",
     session: "Session",
     sessions: "Sessions",
+    settings: "Settings",
     start: "Start",
     stop: "Stop",
     stopTurn: "Stop turn",
     thought: "thought",
     thoughtSummary: "Reasoning summary",
     tokens: "Tokens",
+    tokenEconomy: "Token economy",
+    tokenEconomyDetail: "Start lean and expand context/tools only when needed.",
+    tokenEconomyShort: "Eco",
+    toolApprovals: "Tool approvals",
+    trace: "Trace",
     usage: "usage",
     user: "user",
+    whatCanIDo: "What can I do for you?",
+    yolo: "Yolo",
+    yoloDetail: "Skip ordinary tool approvals for this turn; ask and plan decisions still wait.",
+    chinese: "Chinese",
+    cliPath: "Reasonix CLI",
+    interface: "Interface",
+    openVsCodeSettings: "VS Code Settings",
+    save: "Save",
   },
   zh: {
-    addContext: "加入上下文",
     add: "加入",
     always: "总是允许",
+    act: "执行",
+    apiConfiguration: "API 配置",
+    apiProvider: "API 提供方",
     approval: "审批",
+    approvalReview: "审批：工具请求需确认",
+    ask: "询问",
+    askDetail: "受控工具调用前先询问确认。",
+    autoApproval: "自动",
+    autoApprovalDetail: "本轮自动批准普通工具权限。",
+    autoLanguage: "自动",
+    autoStart: "自动启动",
+    backToChat: "返回",
+    behavior: "行为",
     cache: "缓存",
     cacheDiagnostics: "缓存诊断",
     cancelled: "已取消",
     code: "代码",
     completed: "已完成",
+    clickToDisable: "点击关闭",
+    collaborationModes: "协作方式",
+    composerControls: "输入控制",
+    connection: "连接",
     context: "上下文",
     contextOff: "不带编辑器上下文",
     continue: "继续",
     copied: "已复制",
     copy: "复制",
     cost: "费用",
+    disconnected: "已断开",
+    done: "完成",
     edit: "编辑",
+    english: "英文",
     execute: "执行",
     explainFile: "解释文件",
     failed: "失败",
@@ -1213,13 +1785,20 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     inputTokens: "输入",
     insert: "插入",
     justNow: "刚刚",
+    language: "语言",
     logs: "日志",
     model: "模型",
+    modelOverride: "模型覆盖",
+    modelPlaceholder: "默认模型",
+    mcpServers: "MCP 服务",
+    goal: "目标",
+    goalDetail: "围绕明确目标持续推进，直到完成或阻塞。",
     nearby: "附近代码",
     nearbyDetail: "优先使用选区，没有选区时使用光标附近代码。",
     new: "新建",
     noContext: "没有可用编辑器上下文",
     noSessions: "暂无最近会话",
+    none: "无",
     notice: "通知",
     off: "关闭",
     offDetail: "发送时不附加编辑器上下文。",
@@ -1228,7 +1807,12 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     other: "其他",
     outputTokens: "输出",
     pending: "等待中",
-    placeholder: "输入给 Reasonix 的消息",
+    placeholder: "给 Reasonix 发消息...",
+    plan: "规划",
+    planDetail: "先只读分析并产出计划，确认前避免副作用。",
+    composerHint: "/ 命令 · @ 文件/文件夹",
+    pathPlaceholder: "从 PATH 查找",
+    pickModel: "选择模型",
     read: "读取",
     readyTitle: "准备就绪",
     reasoning: "推理",
@@ -1245,17 +1829,33 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     sendShortcut: "发送 (Enter)，换行 (Shift+Enter)",
     session: "会话",
     sessions: "会话",
+    settings: "设置",
     start: "开始",
     stop: "停止",
     stopTurn: "停止当前回合",
     thought: "思考",
     thoughtSummary: "思考摘要",
     tokens: "Tokens",
+    tokenEconomy: "省 token",
+    tokenEconomyDetail: "精简初始上下文和工具，需要时再扩展。",
+    tokenEconomyShort: "省",
+    toolApprovals: "工具权限",
+    trace: "追踪日志",
     usage: "用量",
     user: "用户",
+    whatCanIDo: "我能帮你做什么？",
+    yolo: "Yolo",
+    yoloDetail: "本轮跳过普通工具审批；ask 问题和计划确认仍会等待。",
+    chinese: "简体中文",
+    cliPath: "Reasonix CLI",
+    interface: "界面",
+    openVsCodeSettings: "VS Code 设置",
+    save: "保存",
   },
 };
 
 function label(key: LabelKey): string {
   return labels[snapshot.locale.toLowerCase().startsWith("zh") ? "zh" : "en"][key];
 }
+
+render(snapshot);

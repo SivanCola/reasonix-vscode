@@ -7,6 +7,13 @@ test("parseWebviewMessage accepts valid prompt messages", () => {
     command: "sendPrompt",
     text: "hi",
   });
+  assert.deepEqual(parseWebviewMessage({ command: "sendPrompt", text: "hi", collaborationMode: "plan", tokenMode: "economy", toolApprovalMode: "auto" }), {
+    command: "sendPrompt",
+    text: "hi",
+    collaborationMode: "plan",
+    tokenMode: "economy",
+    toolApprovalMode: "auto",
+  });
 });
 
 test("parseWebviewMessage rejects malformed messages", () => {
@@ -14,6 +21,10 @@ test("parseWebviewMessage rejects malformed messages", () => {
   assert.equal(parseWebviewMessage({ command: "approvalDecision", id: "1" }), undefined);
   assert.equal(parseWebviewMessage({ command: "unknown", text: "x" }), undefined);
   assert.equal(parseWebviewMessage(null), undefined);
+  assert.deepEqual(parseWebviewMessage({ command: "sendPrompt", text: "hi", collaborationMode: "bad", tokenMode: "bad", toolApprovalMode: "bad" }), {
+    command: "sendPrompt",
+    text: "hi",
+  });
 });
 
 test("parseWebviewMessage accepts approval decisions with stable ids", () => {
@@ -41,6 +52,22 @@ test("parseWebviewMessage accepts product UI commands", () => {
     command: "openToolPreview",
     index: 2,
   });
+  assert.deepEqual(parseWebviewMessage({ command: "pickUiLanguage" }), {
+    command: "pickUiLanguage",
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "openNativeSettings" }), {
+    command: "openNativeSettings",
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "updateSetting", key: "uiLanguage", value: "zh-CN" }), {
+    command: "updateSetting",
+    key: "uiLanguage",
+    value: "zh-CN",
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "updateSetting", key: "trace", value: true }), {
+    command: "updateSetting",
+    key: "trace",
+    value: true,
+  });
 });
 
 test("parseWebviewMessage rejects malformed product UI commands", () => {
@@ -49,4 +76,7 @@ test("parseWebviewMessage rejects malformed product UI commands", () => {
   assert.equal(parseWebviewMessage({ command: "loadSession", sessionId: "" }), undefined);
   assert.equal(parseWebviewMessage({ command: "retryMessage", index: -1 }), undefined);
   assert.equal(parseWebviewMessage({ command: "insertMessage", index: 1.5 }), undefined);
+  assert.equal(parseWebviewMessage({ command: "updateSetting", key: "trace", value: "true" }), undefined);
+  assert.equal(parseWebviewMessage({ command: "updateSetting", key: "uiLanguage", value: "fr" }), undefined);
+  assert.equal(parseWebviewMessage({ command: "updateSetting", key: "unknown", value: true }), undefined);
 });

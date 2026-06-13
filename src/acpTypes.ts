@@ -186,16 +186,6 @@ export interface EffortSetResult {
   level: string;
 }
 
-export interface SurfaceListResult {
-  commands: SlashCommandInfo[];
-  skills: SkillInfo[];
-  disabledSkills?: SkillInfo[];
-  mcpServers?: MCPServerInfo[];
-  mcpPrompts?: MCPPromptInfo[];
-  mcpResources?: MCPResourceInfo[];
-  slashCompletions?: SlashCompletionInfo[];
-}
-
 export interface SlashCommandInfo {
   name: string;
   description?: string;

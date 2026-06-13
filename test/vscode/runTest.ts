@@ -12,6 +12,8 @@ async function main(): Promise<void> {
   const fakeAcp = path.join(workspacePath, process.platform === "win32" ? "fake-acp.cmd" : "fake-acp");
   const fakeLog = path.join(workspacePath, "fake-acp.log");
   fs.writeFileSync(path.join(workspacePath, "sample.ts"), "const answer = 42;\n");
+  fs.mkdirSync(path.join(workspacePath, "src"));
+  fs.writeFileSync(path.join(workspacePath, "src", "helper.ts"), "export const helper = true;\n");
   writeFakeAcpWrapper(fakeAcp, fakeAcpScript);
 
   await runTests({
@@ -22,6 +24,8 @@ async function main(): Promise<void> {
       REASONIX_FAKE_ACP: fakeAcp,
       REASONIX_FAKE_LOG: fakeLog,
       REASONIX_TEST_WORKSPACE: workspacePath,
+      REASONIX_TEST_COMMANDS: "1",
+      REASONIX_FAKE_MODEL_LIST_ERROR: "1",
     },
   });
 }
