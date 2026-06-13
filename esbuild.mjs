@@ -27,7 +27,7 @@ const builds = [
   },
   {
     ...common,
-    entryPoints: ["test/jsonRpc.test.ts", "test/chatState.test.ts", "test/webviewProtocol.test.ts", "test/sanitize.test.ts"],
+    entryPoints: ["test/jsonRpc.test.ts", "test/chatState.test.ts", "test/webviewProtocol.test.ts", "test/sanitize.test.ts", "test/keyboard.test.ts"],
     outdir: "dist/test",
     platform: "node",
     format: "cjs",

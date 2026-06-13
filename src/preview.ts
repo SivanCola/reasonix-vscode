@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
-import type { PermissionRequestParams } from "./acpTypes";
+import type { ChangePreview, PermissionRequestParams } from "./acpTypes";
 
 type PreviewInput = {
   path?: string;
@@ -30,8 +30,7 @@ export class DiffPreviewProvider implements vscode.TextDocumentContentProvider {
 
   async previewPermission(params: PermissionRequestParams, workspaceFolder: vscode.WorkspaceFolder | undefined): Promise<void> {
     if (params.toolCall.preview && params.toolCall.preview.binary !== true) {
-      const target = resolveTarget(params.toolCall.preview.path, workspaceFolder);
-      await this.openPreview(target, params.toolCall.preview.oldText ?? "", params.toolCall.preview.newText ?? "", workspaceFolder);
+      await this.previewChange(params.toolCall.preview, workspaceFolder);
       return;
     }
     const raw = params.toolCall.rawInput;
@@ -52,6 +51,14 @@ export class DiffPreviewProvider implements vscode.TextDocumentContentProvider {
     }
 
     await this.openPreview(target, oldText, nextText, workspaceFolder);
+  }
+
+  async previewChange(preview: ChangePreview, workspaceFolder: vscode.WorkspaceFolder | undefined): Promise<void> {
+    if (preview.binary === true) {
+      return;
+    }
+    const target = resolveTarget(preview.path, workspaceFolder);
+    await this.openPreview(target, preview.oldText ?? "", preview.newText ?? "", workspaceFolder);
   }
 
   private async openPreview(target: vscode.Uri, oldText: string, nextText: string, workspaceFolder: vscode.WorkspaceFolder | undefined): Promise<void> {

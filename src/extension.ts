@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import * as vscode from "vscode";
 import { AcpClient } from "./acpClient";
 import type {
+  ChangePreview,
   ModelInfo,
   PermissionRequestParams,
   PermissionRequestResult,
@@ -12,7 +13,7 @@ import type {
   UsageData,
 } from "./acpTypes";
 import { appendApproval, appendNotice, appendUserMessage, applySessionUpdate, resolveApproval as resolveApprovalItem, type ChatItem } from "./chatState";
-import { buildEditorContext, buildEditorContextInfo } from "./editorContext";
+import { buildEditorContext, buildEditorContextInfo, configuredSelectionMode, type IncludeSelectionMode } from "./editorContext";
 import { DiffPreviewProvider } from "./preview";
 import { redactLocalPaths } from "./sanitize";
 import { parseWebviewMessage } from "./webviewProtocol";
@@ -25,6 +26,8 @@ type WorkspaceChatState = {
   running: boolean;
   disconnected: boolean;
   status: string;
+  sessionId?: string;
+  sessionTitle?: string;
   usage?: UsageData;
   surfaces?: SurfaceListResult;
   models?: ModelInfo[];
@@ -33,6 +36,17 @@ type WorkspaceChatState = {
 type ChatSnapshot = WorkspaceChatState & {
   workspace: string;
   contextMode: string;
+  contextSummary?: string;
+  modelLabel: string;
+  cacheLabel?: string;
+  locale: string;
+  sessions: SessionSummary[];
+};
+
+type SessionSummary = {
+  id: string;
+  title: string;
+  updatedAt: number;
 };
 
 type PendingApproval = {
@@ -65,6 +79,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("reasonix.pickModel", () => provider.pickModel()),
     vscode.commands.registerCommand("reasonix.showOutput", () => output.show()),
     vscode.window.onDidChangeActiveTextEditor(() => provider.refreshActiveWorkspace()),
+    vscode.window.onDidChangeTextEditorSelection(() => provider.refreshActiveWorkspace()),
   );
   provider.refreshActiveWorkspace();
 }
@@ -124,6 +139,8 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     state.running = false;
     state.disconnected = true;
     state.status = "New session";
+    state.sessionId = undefined;
+    state.sessionTitle = undefined;
     state.usage = undefined;
     state.surfaces = undefined;
     await this.context.workspaceState.update(this.sessionStorageKey(folder), undefined);
@@ -184,6 +201,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     const config = vscode.workspace.getConfiguration("reasonix");
     await config.update("model", picked.model.ref, vscode.ConfigurationTarget.Workspace);
 
+    let selectedEffort = picked.model.effort;
     if (picked.model.effortSupported && picked.model.effortLevels && picked.model.effortLevels.length > 0) {
       const effort = await vscode.window.showQuickPick(picked.model.effortLevels, {
         title: `Reasonix effort for ${picked.model.ref}`,
@@ -191,8 +209,14 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       });
       if (effort) {
         await client.setEffort(picked.model.ref, effort);
+        selectedEffort = effort;
       }
     }
+    state.models = models.models.map((model) => ({
+      ...model,
+      current: model.ref === picked.model.ref,
+      effort: model.ref === picked.model.ref ? selectedEffort : model.effort,
+    }));
 
     this.clearPendingApprovals(workspaceKey(folder));
     this.clients.get(workspaceKey(folder))?.dispose();
@@ -229,6 +253,39 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
         }
         return;
       }
+      case "setContextMode":
+        await this.setContextMode(message.mode);
+        return;
+      case "pickModel":
+        await this.pickModel();
+        return;
+      case "showOutput":
+        this.output.show();
+        return;
+      case "loadSession":
+        await this.loadSession(message.sessionId);
+        return;
+      case "quickPrompt":
+        await this.runQuickPrompt(message.action);
+        return;
+      case "copyText":
+        await vscode.env.clipboard.writeText(message.text);
+        return;
+      case "openExternal":
+        await this.openExternal(message.href);
+        return;
+      case "insertMessage":
+        await this.insertMessage(message.index);
+        return;
+      case "retryMessage":
+        await this.retryMessage(message.index);
+        return;
+      case "continueMessage":
+        await this.continueMessage(message.index);
+        return;
+      case "openToolPreview":
+        await this.openToolPreview(message.index);
+        return;
       case "approvalDecision":
         this.resolveApproval(message.id, message.optionId);
         return;
@@ -238,6 +295,155 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       default:
         assertNever(message);
     }
+  }
+
+  private async setContextMode(mode: IncludeSelectionMode): Promise<void> {
+    await vscode.workspace.getConfiguration("reasonix").update("includeSelectionMode", mode, vscode.ConfigurationTarget.Workspace);
+    this.postSnapshot();
+  }
+
+  private async loadSession(sessionId: string): Promise<void> {
+    const folder = this.currentWorkspaceFolder();
+    if (!folder) {
+      void vscode.window.showErrorMessage("Open a workspace folder before loading a Reasonix session.");
+      return;
+    }
+    const state = this.stateFor(folder);
+    if (state.running) {
+      void vscode.window.showWarningMessage("Reasonix is running. Cancel the current turn before switching sessions.");
+      return;
+    }
+    if (state.sessionId === sessionId && this.clients.get(workspaceKey(folder))?.connected) {
+      return;
+    }
+    const key = workspaceKey(folder);
+    const entry = this.sessionHistory(folder).find((candidate) => candidate.id === sessionId);
+    this.clearPendingApprovals(key);
+    this.clients.get(key)?.dispose();
+    this.clients.delete(key);
+    state.items = [];
+    state.running = false;
+    state.disconnected = true;
+    state.status = "Loading session";
+    state.sessionId = sessionId;
+    state.sessionTitle = entry?.title;
+    state.usage = undefined;
+    state.surfaces = undefined;
+    await this.context.workspaceState.update(this.sessionStorageKey(folder), sessionId);
+    this.postSnapshot();
+    await this.ensureClient(folder);
+  }
+
+  private async runQuickPrompt(action: "explainFile" | "fixSelection" | "runTests" | "searchRepo"): Promise<void> {
+    switch (action) {
+      case "explainFile":
+        await this.sendPrompt("Explain the current file. Focus on purpose, important flows, and risky areas.", true);
+        return;
+      case "fixSelection":
+        await this.sendPrompt("Fix the selected code. Keep the change focused, preserve existing behavior, and explain what changed.", true);
+        return;
+      case "runTests":
+        await this.sendPrompt("Run the relevant tests for this workspace. If failures appear, diagnose and fix them.", false);
+        return;
+      case "searchRepo":
+        await this.sendPrompt("Search the repository for the relevant implementation, summarize what you find, and point to the key files.", false);
+        return;
+      default:
+        assertNever(action);
+    }
+  }
+
+  private async openExternal(href: string): Promise<void> {
+    try {
+      const uri = vscode.Uri.parse(href);
+      if (uri.scheme !== "http" && uri.scheme !== "https" && uri.scheme !== "mailto") {
+        return;
+      }
+      await vscode.env.openExternal(uri);
+    } catch {
+      // Ignore malformed links sent by the webview.
+    }
+  }
+
+  private async insertMessage(index: number): Promise<void> {
+    const text = this.messageTextAt(index);
+    if (!text) {
+      return;
+    }
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      void vscode.window.showInformationMessage("Open an editor before inserting a Reasonix message.");
+      return;
+    }
+    await editor.edit((edit) => edit.insert(editor.selection.active, text));
+    await vscode.window.showTextDocument(editor.document);
+  }
+
+  private async retryMessage(index: number): Promise<void> {
+    const prompt = this.retryPromptAt(index);
+    if (prompt) {
+      await this.sendPrompt(prompt, true);
+    }
+  }
+
+  private async continueMessage(_index: number): Promise<void> {
+    await this.sendPrompt("Continue from your last response.", false);
+  }
+
+  private async openToolPreview(index: number): Promise<void> {
+    const folder = this.currentWorkspaceFolder();
+    const preview = this.previewAt(index);
+    if (!preview) {
+      void vscode.window.showInformationMessage("No diff preview is available for this item.");
+      return;
+    }
+    await this.preview.previewChange(preview, folder);
+  }
+
+  private messageTextAt(index: number): string | undefined {
+    const folder = this.currentWorkspaceFolder();
+    if (!folder) {
+      return undefined;
+    }
+    const item = this.stateFor(folder).items[index];
+    if (item?.type === "message") {
+      return item.text;
+    }
+    if (item?.type === "tool") {
+      return item.content ?? (item.rawInput === undefined ? undefined : JSON.stringify(item.rawInput, null, 2));
+    }
+    if (item?.type === "approval") {
+      return item.rawInput === undefined ? undefined : JSON.stringify(item.rawInput, null, 2);
+    }
+    return undefined;
+  }
+
+  private retryPromptAt(index: number): string | undefined {
+    const folder = this.currentWorkspaceFolder();
+    if (!folder) {
+      return undefined;
+    }
+    const items = this.stateFor(folder).items;
+    const direct = items[index];
+    if (direct?.type === "message" && direct.role === "user") {
+      return direct.text;
+    }
+    for (let i = Math.min(index, items.length - 1); i >= 0; i -= 1) {
+      const item = items[i];
+      if (item?.type === "message" && item.role === "user") {
+        return item.text;
+      }
+    }
+    return undefined;
+  }
+
+  private previewAt(index: number): ChangePreview | undefined {
+    const folder = this.currentWorkspaceFolder();
+    if (!folder) {
+      return undefined;
+    }
+    const item = this.stateFor(folder).items[index];
+    return item?.type === "tool" || item?.type === "approval" ? item.preview : undefined;
   }
 
   private async sendPrompt(text: string, appendContext: boolean): Promise<void> {
@@ -263,9 +469,10 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       if (!prompt) {
         return;
       }
-      appendUserMessage(state.items, prompt);
+      appendUserMessage(state.items, trimmed);
+      await this.updateCurrentSessionTitle(folder, trimmed);
       state.running = true;
-      state.status = "Running";
+      state.status = "Sending";
       this.postSnapshot();
 
       try {
@@ -364,7 +571,9 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
         this.postSnapshot();
       },
       onSessionId: (sessionId) => {
+        state.sessionId = sessionId;
         void this.context.workspaceState.update(this.sessionStorageKey(folder), sessionId);
+        void this.rememberSession(folder, sessionId, state.sessionTitle ?? "New session");
       },
     });
     this.clients.set(key, client);
@@ -391,6 +600,28 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
   private handleSessionUpdate(folder: vscode.WorkspaceFolder, params: SessionUpdateParams): void {
     const state = this.stateFor(folder);
     applySessionUpdate(state.items, params.update);
+    switch (params.update.sessionUpdate) {
+      case "agent_thought_chunk":
+        state.status = "Thinking";
+        break;
+      case "agent_message_chunk":
+        state.status = "Responding";
+        break;
+      case "tool_call":
+        state.status = params.update.title ? `Using ${params.update.title}` : "Using tool";
+        break;
+      case "tool_call_update":
+        state.status = params.update.status === "failed" ? "Tool failed" : "Working";
+        break;
+      case "usage":
+        state.status = "Updating usage";
+        break;
+      case "user_message_chunk":
+        state.status = "Sending";
+        break;
+      default:
+        assertNever(params.update);
+    }
     if (params.update.sessionUpdate === "usage") {
       state.usage = params.update.usage;
       this.updateStatusBar(folder);
@@ -401,6 +632,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
   private async handlePermissionRequest(folder: vscode.WorkspaceFolder, params: PermissionRequestParams): Promise<PermissionRequestResult> {
     const state = this.stateFor(folder);
     appendApproval(state.items, params);
+    state.status = "Waiting for approval";
     this.postSnapshot();
     try {
       await this.preview.previewPermission(params, folder);
@@ -491,13 +723,32 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
   private postSnapshot(): void {
     const folder = this.currentWorkspaceFolder();
     const state = folder ? this.stateFor(folder) : emptyState();
+    const contextMode = configuredSelectionMode();
+    const contextInfo = buildEditorContextInfo(contextMode);
     const snapshot: ChatSnapshot = {
       ...state,
       workspace: folder?.name ?? "No workspace",
-      contextMode: vscode.workspace.getConfiguration("reasonix").get<string>("includeSelectionMode", "selectionOnly"),
+      contextMode,
+      contextSummary: contextInfo?.summary,
+      modelLabel: this.modelLabel(state),
+      cacheLabel: state.usage ? cacheBrief(state.usage) : undefined,
+      locale: vscode.env.language,
+      sessions: folder ? this.sessionHistory(folder) : [],
     };
     this.updateStatusBar(folder);
     void this.view?.webview.postMessage({ type: "stateSnapshot", state: snapshot });
+  }
+
+  private modelLabel(state: WorkspaceChatState): string {
+    const configured = vscode.workspace.getConfiguration("reasonix").get<string>("model", "").trim();
+    const current = state.models?.find((model) => model.ref === configured) ?? state.models?.find((model) => model.current);
+    if (configured) {
+      return current?.effort ? `${configured} / ${current.effort}` : configured;
+    }
+    if (current) {
+      return current.effort ? `${current.ref} / ${current.effort}` : current.ref;
+    }
+    return "Default model";
   }
 
   private html(webview: vscode.Webview): string {
@@ -521,22 +772,30 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
         <div class="status-copy">
           <div id="status" class="status">Idle</div>
           <div id="workspaceName" class="workspace-name"></div>
+          <div id="toolbarMeta" class="toolbar-meta"></div>
         </div>
       </div>
       <div class="toolbar-actions">
-        <button id="newSession" class="icon-button" title="New session" aria-label="New session" type="button">+</button>
-        <button id="insertSelection" class="icon-button" title="Insert editor context" aria-label="Insert editor context" type="button">@</button>
-        <button id="cancel" class="icon-button danger" title="Stop turn" aria-label="Stop turn" type="button">Stop</button>
+        <button id="sessionMenu" class="toolbar-button" title="Recent sessions" aria-label="Recent sessions" type="button">Sessions</button>
+        <button id="newSession" class="toolbar-button" title="New session" aria-label="New session" type="button">New</button>
+        <button id="modelButton" class="toolbar-button" title="Pick model and effort" aria-label="Pick model and effort" type="button">Model</button>
+        <button id="outputButton" class="icon-button" title="Show output" aria-label="Show output" type="button">Logs</button>
       </div>
+      <div id="sessionPopover" class="popover session-popover" hidden></div>
     </header>
     <main id="transcript" class="transcript"></main>
     <form id="composer" class="composer">
-      <div id="contextHint" class="context-hint"></div>
-      <textarea id="prompt" rows="3" placeholder="Message Reasonix"></textarea>
-      <div class="composer-footer">
-        <div id="surfaceBar" class="surface-bar"></div>
+      <div class="context-row">
+        <button id="contextModeButton" class="context-pill" type="button"></button>
+        <span id="contextSummary" class="context-summary"></span>
+        <button id="insertSelection" class="context-action" title="Insert editor context" aria-label="Insert editor context" type="button">Add</button>
+        <div id="contextMenu" class="popover context-menu" hidden></div>
+      </div>
+      <div class="input-wrap">
+        <textarea id="prompt" rows="3" placeholder="Message Reasonix"></textarea>
         <button id="send" class="send-button" type="submit">Send</button>
       </div>
+      <div id="surfaceBar" class="surface-bar"></div>
     </form>
   </div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
@@ -567,6 +826,41 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
 
   private sessionStorageKey(folder: vscode.WorkspaceFolder): string {
     return `reasonix.session.${workspaceKey(folder)}`;
+  }
+
+  private sessionHistoryKey(folder: vscode.WorkspaceFolder): string {
+    return `reasonix.sessionHistory.${workspaceKey(folder)}`;
+  }
+
+  private sessionHistory(folder: vscode.WorkspaceFolder): SessionSummary[] {
+    const raw = this.context.workspaceState.get<unknown>(this.sessionHistoryKey(folder));
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    return raw
+      .filter(isSessionSummary)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, 12);
+  }
+
+  private async rememberSession(folder: vscode.WorkspaceFolder, sessionId: string, title: string): Promise<void> {
+    const normalizedTitle = title.trim() || "New session";
+    const now = Date.now();
+    const history = this.sessionHistory(folder).filter((entry) => entry.id !== sessionId);
+    history.unshift({ id: sessionId, title: normalizedTitle, updatedAt: now });
+    await this.context.workspaceState.update(this.sessionHistoryKey(folder), history.slice(0, 12));
+  }
+
+  private async updateCurrentSessionTitle(folder: vscode.WorkspaceFolder, prompt: string): Promise<void> {
+    const state = this.stateFor(folder);
+    const sessionId = state.sessionId ?? this.clients.get(workspaceKey(folder))?.id;
+    if (!sessionId) {
+      return;
+    }
+    const title = state.sessionTitle && state.sessionTitle !== "New session" ? state.sessionTitle : titleFromPrompt(prompt);
+    state.sessionId = sessionId;
+    state.sessionTitle = title;
+    await this.rememberSession(folder, sessionId, title);
   }
 
   private updateStatusBar(folder: vscode.WorkspaceFolder | undefined): void {
@@ -620,6 +914,32 @@ function emptyState(): WorkspaceChatState {
   return { items: [], running: false, disconnected: true, status: "Idle" };
 }
 
+function cacheBrief(usage: UsageData): string | undefined {
+  const total = usage.sessionCacheHitTokens + usage.sessionCacheMissTokens;
+  if (total <= 0) {
+    return undefined;
+  }
+  return `cache ${Math.round((usage.sessionCacheHitTokens / total) * 100)}%`;
+}
+
+function titleFromPrompt(prompt: string): string {
+  const compact = prompt
+    .replace(/<vscode_context>[\s\S]*?<\/vscode_context>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (compact === "") {
+    return "New session";
+  }
+  return compact.length > 58 ? `${compact.slice(0, 55)}...` : compact;
+}
+
+function isSessionSummary(value: unknown): value is SessionSummary {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return typeof value.id === "string" && typeof value.title === "string" && typeof value.updatedAt === "number";
+}
+
 function permissionDetail(params: PermissionRequestParams): string {
   const lines = [`Kind: ${params.toolCall.kind ?? "other"}`];
   if (params.toolCall.preview) {
@@ -643,6 +963,10 @@ function getNonce(): string {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function assertNever(value: never): never {

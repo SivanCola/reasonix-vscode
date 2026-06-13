@@ -31,6 +31,9 @@ export function buildEditorContextInfo(mode = configuredSelectionMode()): { text
   const filePath = workspaceFolder ? path.relative(workspaceFolder.uri.fsPath, doc.uri.fsPath) : doc.uri.fsPath;
   const selection = editor.selection;
   const hasSelection = !selection.isEmpty;
+  if (mode === "selectionOnly" && !hasSelection) {
+    return undefined;
+  }
   const range = hasSelection ? selection : cursorWindow(doc, selection.active.line);
   const selectedText = doc.getText(range);
   if (selectedText.trim() === "") {
