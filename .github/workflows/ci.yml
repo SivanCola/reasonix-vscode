@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint, Test, and Package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+      - name: Type check
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Install VS Code test display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
+      - name: VS Code extension host tests
+        run: xvfb-run -a npm run test:vscode
+
+      - name: Real ACP smoke test
+        run: npm run smoke:acp
+
+      - name: Package VSIX
+        run: npm run package:vsix
+
+      - name: Verify VSIX contents
+        run: npm run verify:vsix-contents
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reasonix-vscode-vsix
+          path: dist/reasonix-vscode.vsix
+          if-no-files-found: error

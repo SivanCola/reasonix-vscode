@@ -1,0 +1,223 @@
+{
+  "name": "reasonix-agent",
+  "displayName": "Reasonix",
+  "description": "Cache-first Reasonix coding agent integration for VS Code.",
+  "version": "0.1.1",
+  "publisher": "SivanLiu",
+  "license": "MIT",
+  "homepage": "https://github.com/SivanCola/reasonix-vscode#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SivanCola/reasonix-vscode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SivanCola/reasonix-vscode/issues"
+  },
+  "galleryBanner": {
+    "color": "#172033",
+    "theme": "dark"
+  },
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:reasonix.chat",
+    "onCommand:reasonix.openChat",
+    "onCommand:reasonix.newSession",
+    "onCommand:reasonix.sendSelection",
+    "onCommand:reasonix.cancelTurn",
+    "onCommand:reasonix.pickModel",
+    "onCommand:reasonix.pickUiLanguage",
+    "onCommand:reasonix.openSettings",
+    "onCommand:reasonix.showOutput"
+  ],
+  "main": "./dist/extension.js",
+  "files": [
+    "dist/extension.js",
+    "media/webview.js",
+    "media/styles.css",
+    "media/icon.svg",
+    "media/icon.png",
+    "scripts/acp-smoke.mjs",
+    "scripts/verify-vsix-contents.mjs",
+    "CHANGELOG.md",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "reasonix.openChat",
+        "title": "Reasonix: Open Chat",
+        "category": "Reasonix"
+      },
+      {
+        "command": "reasonix.newSession",
+        "title": "Reasonix: New Session",
+        "category": "Reasonix"
+      },
+      {
+        "command": "reasonix.sendSelection",
+        "title": "Reasonix: Send Selection",
+        "category": "Reasonix"
+      },
+      {
+        "command": "reasonix.cancelTurn",
+        "title": "Reasonix: Cancel Turn",
+        "category": "Reasonix"
+      },
+      {
+        "command": "reasonix.pickModel",
+        "title": "Reasonix: Pick Model",
+        "category": "Reasonix"
+      },
+      {
+        "command": "reasonix.pickUiLanguage",
+        "title": "Reasonix: Pick UI Language",
+        "category": "Reasonix"
+      },
+      {
+        "command": "reasonix.openSettings",
+        "title": "Reasonix: Open Settings",
+        "category": "Reasonix"
+      },
+      {
+        "command": "reasonix.showOutput",
+        "title": "Reasonix: Show Output",
+        "category": "Reasonix"
+      }
+    ],
+    "configuration": {
+      "title": "Reasonix",
+      "properties": {
+        "reasonix.binaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the Reasonix CLI. When empty, the extension resolves reasonix from PATH."
+        },
+        "reasonix.model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional provider/model reference passed to reasonix acp --model."
+        },
+        "reasonix.uiLanguage": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "en",
+            "zh-CN"
+          ],
+          "default": "auto",
+          "description": "Controls the Reasonix chat UI language.",
+          "enumDescriptions": [
+            "Follow the VS Code display language.",
+            "Use English.",
+            "Use Simplified Chinese."
+          ]
+        },
+        "reasonix.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start the Reasonix ACP process when the chat view is opened."
+        },
+        "reasonix.trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write ACP JSON-RPC traffic diagnostics to the Reasonix output channel."
+        },
+        "reasonix.includeSelectionMode": {
+          "type": "string",
+          "enum": [
+            "off",
+            "selectionOnly",
+            "nearby"
+          ],
+          "default": "selectionOnly",
+          "description": "Controls how the active editor selection or cursor window is appended to prompts."
+        }
+      }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "reasonix.sendSelection",
+          "when": "editorTextFocus",
+          "group": "navigation@90"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "reasonix.openChat"
+        },
+        {
+          "command": "reasonix.newSession"
+        },
+        {
+          "command": "reasonix.sendSelection"
+        },
+        {
+          "command": "reasonix.cancelTurn"
+        },
+        {
+          "command": "reasonix.pickModel"
+        },
+        {
+          "command": "reasonix.pickUiLanguage"
+        },
+        {
+          "command": "reasonix.openSettings"
+        },
+        {
+          "command": "reasonix.showOutput"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "reasonix",
+          "title": "Reasonix",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "reasonix": [
+        {
+          "id": "reasonix.chat",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "npm run compile",
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "lint": "tsc --noEmit",
+    "test": "npm run compile && node --test dist/test/*.test.js",
+    "test:vscode": "npm run compile && node dist/test/vscode/runTest.js",
+    "smoke:acp": "node scripts/acp-smoke.mjs",
+    "debug:extension": "npm run lint && npm test && npm run test:vscode && npm run smoke:acp",
+    "package:vsix": "vsce package --no-dependencies -o dist/reasonix-vscode.vsix",
+    "verify:vsix-contents": "node scripts/verify-vsix-contents.mjs dist/reasonix-vscode.vsix",
+    "package": "vsce package",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.92.0",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.7.2"
+  }
+}

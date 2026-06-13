@@ -1,0 +1,23 @@
+# Dependencies and build artifacts
+node_modules/
+dist/
+.vscode-test/
+media/webview.js
+media/webview.js.map
+*.vsix
+
+# Environment / local config
+.env
+.env.local
+*.local
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.vscode-dev/
+
+# Scratch / agent working dirs (never committed)
+/tmp/
+/.codex/
