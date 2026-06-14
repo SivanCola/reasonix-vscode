@@ -17,6 +17,7 @@ Thumbs.db
 .idea/
 .vscode/
 .vscode-dev/
+.dev/
 
 # Scratch / agent working dirs (never committed)
 /tmp/

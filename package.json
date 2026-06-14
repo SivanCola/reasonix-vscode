@@ -32,6 +32,7 @@
     "onCommand:reasonix.sendSelection",
     "onCommand:reasonix.cancelTurn",
     "onCommand:reasonix.pickModel",
+    "onCommand:reasonix.pickEffort",
     "onCommand:reasonix.pickUiLanguage",
     "onCommand:reasonix.openSettings",
     "onCommand:reasonix.showOutput"
@@ -42,6 +43,7 @@
     "media/webview.js",
     "media/styles.css",
     "media/icon.svg",
+    "media/mark.svg",
     "media/icon.png",
     "scripts/acp-smoke.mjs",
     "scripts/verify-vsix-contents.mjs",
@@ -76,6 +78,11 @@
       {
         "command": "reasonix.pickModel",
         "title": "Reasonix: Pick Model",
+        "category": "Reasonix"
+      },
+      {
+        "command": "reasonix.pickEffort",
+        "title": "Reasonix: Pick Effort",
         "category": "Reasonix"
       },
       {
@@ -169,6 +176,9 @@
           "command": "reasonix.pickModel"
         },
         {
+          "command": "reasonix.pickEffort"
+        },
+        {
           "command": "reasonix.pickUiLanguage"
         },
         {
@@ -202,6 +212,7 @@
     "build": "npm run compile",
     "compile": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
+    "dev:host": "node scripts/open-dev-host.mjs",
     "lint": "tsc --noEmit",
     "test": "npm run compile && node --test dist/test/*.test.js",
     "test:vscode": "npm run compile && node dist/test/vscode/runTest.js",

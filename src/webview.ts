@@ -1,6 +1,8 @@
 import type { ChangePreview, UsageData } from "./acpTypes";
 import type { ChatItem } from "./chatState";
+import { getComposerTrigger, replaceComposerTrigger, slashSuggestions, type ComposerTrigger } from "./composerSuggestions";
 import { shouldSubmitPromptOnKeydown } from "./keyboard";
+import type { ResourceSuggestion } from "./resourceSuggestions";
 import type { HostToWebviewMessage } from "./webviewProtocol";
 
 declare function acquireVsCodeApi(): {
@@ -16,6 +18,8 @@ type CollaborationMode = "normal" | "plan" | "goal";
 type TokenMode = "standard" | "economy";
 type ToolApprovalMode = "ask" | "auto" | "yolo";
 type SettingsTab = "connection" | "interface" | "behavior";
+
+const toolApprovalModes: ToolApprovalMode[] = ["ask", "auto", "yolo"];
 
 type SettingsSnapshot = {
   binaryPath: string;
@@ -47,6 +51,8 @@ type Snapshot = {
   contextMode: IncludeSelectionMode;
   usage?: UsageData;
   modelLabel: string;
+  effortLabel: string;
+  effortSupported: boolean;
   cacheLabel?: string;
   locale: string;
   uiLanguage: UiLanguage;
@@ -67,16 +73,21 @@ const toolbarMeta = mustElement("toolbarMeta");
 const send = mustElement("send") as HTMLButtonElement;
 const collaborationButton = mustElement("collaborationButton") as HTMLButtonElement;
 const collaborationMenu = mustElement("collaborationMenu");
-const controlSummaryButton = mustElement("controlSummaryButton") as HTMLButtonElement;
+const modeChipTray = mustElement("modeChipTray");
+const approvalSummaryButton = mustElement("approvalSummaryButton") as HTMLButtonElement;
 const controlsMenu = mustElement("controlsMenu");
 const controlsApprovalLabel = mustElement("controlsApprovalLabel");
 const approvalModebar = mustElement("approvalModebar");
 const composerHint = mustElement("composerHint");
+const suggestionMenu = mustElement("suggestionMenu");
 const newSession = mustElement("newSession") as HTMLButtonElement;
 const composer = mustElement("composer") as HTMLFormElement;
 const sessionMenu = mustElement("sessionMenu") as HTMLButtonElement;
 const sessionPopover = mustElement("sessionPopover");
-const modelButton = mustElement("modelButton") as HTMLButtonElement;
+const runtimeSettingsButton = mustElement("runtimeSettingsButton") as HTMLButtonElement;
+const runtimeModelLabel = mustElement("runtimeModelLabel");
+const runtimeEffortLabel = mustElement("runtimeEffortLabel");
+const runtimeSettingsMenu = mustElement("runtimeSettingsMenu");
 const settingsButton = mustElement("settingsButton") as HTMLButtonElement;
 const chatToolbarActions = mustElement("chatToolbarActions");
 const settingsToolbarActions = mustElement("settingsToolbarActions");
@@ -87,12 +98,31 @@ let snapshot: Snapshot = normalizeSnapshot(vscode.getState());
 let sessionMenuOpen = false;
 let collaborationMenuOpen = false;
 let controlsMenuOpen = false;
+let runtimeMenuOpen = false;
 let settingsOpen = false;
 let settingsTab: SettingsTab = "connection";
 let collaborationMode: CollaborationMode = "normal";
 let tokenMode: TokenMode = "economy";
 let toolApprovalMode: ToolApprovalMode = "ask";
 let compositionActive = false;
+let suggestionState: SuggestionState = emptySuggestionState();
+let resourceSuggestionRequestId = 0;
+
+type SuggestionState = {
+  trigger?: ComposerTrigger;
+  items: ComposerMenuItem[];
+  selectedIndex: number;
+  resourceRequestId?: number;
+  loading: boolean;
+};
+
+type ComposerMenuItem = {
+  icon: string;
+  title: string;
+  detail: string;
+  badge: string;
+  insertText: string;
+};
 
 composer.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -100,6 +130,9 @@ composer.addEventListener("submit", (event) => {
 });
 
 prompt.addEventListener("keydown", (event) => {
+  if (handleSuggestionKeydown(event)) {
+    return;
+  }
   if (shouldSubmitPromptOnKeydown(event, compositionActive)) {
     event.preventDefault();
     submitPrompt();
@@ -112,21 +145,60 @@ prompt.addEventListener("compositionstart", () => {
 
 prompt.addEventListener("compositionend", () => {
   compositionActive = false;
+  updateComposerSuggestions();
 });
 
 prompt.addEventListener("input", () => {
   resizePrompt();
   updateSendButton(snapshot);
+  updateComposerSuggestions();
+});
+
+prompt.addEventListener("click", () => {
+  updateComposerSuggestions();
+});
+
+prompt.addEventListener("keyup", (event) => {
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Home" || event.key === "End") {
+    updateComposerSuggestions();
+  }
+});
+
+prompt.addEventListener("select", () => {
+  updateComposerSuggestions();
+});
+
+suggestionMenu.addEventListener("mousedown", (event) => {
+  event.preventDefault();
+});
+
+suggestionMenu.addEventListener("click", (event) => {
+  const button = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-suggestion-index]");
+  if (!button) {
+    return;
+  }
+  const index = Number(button.dataset.suggestionIndex);
+  if (Number.isInteger(index)) {
+    acceptSuggestion(index);
+  }
 });
 
 newSession.addEventListener("click", () => vscode.postMessage({ command: "newSession" }));
-modelButton.addEventListener("click", () => vscode.postMessage({ command: "pickModel" }));
+runtimeSettingsButton.addEventListener("click", (event) => {
+  event.stopPropagation();
+  runtimeMenuOpen = !runtimeMenuOpen;
+  sessionMenuOpen = false;
+  collaborationMenuOpen = false;
+  controlsMenuOpen = false;
+  renderMenus(snapshot);
+});
 settingsButton.addEventListener("click", () => {
   settingsOpen = true;
   settingsTab = "connection";
   sessionMenuOpen = false;
   collaborationMenuOpen = false;
   controlsMenuOpen = false;
+  runtimeMenuOpen = false;
   render(snapshot);
 });
 settingsBackButton.addEventListener("click", () => {
@@ -134,6 +206,7 @@ settingsBackButton.addEventListener("click", () => {
   sessionMenuOpen = false;
   collaborationMenuOpen = false;
   controlsMenuOpen = false;
+  runtimeMenuOpen = false;
   render(snapshot);
 });
 
@@ -142,19 +215,53 @@ collaborationButton.addEventListener("click", (event) => {
   collaborationMenuOpen = !collaborationMenuOpen;
   sessionMenuOpen = false;
   controlsMenuOpen = false;
+  runtimeMenuOpen = false;
   renderMenus(snapshot);
 });
 
-controlSummaryButton.addEventListener("click", (event) => {
+approvalSummaryButton.addEventListener("click", (event) => {
   event.stopPropagation();
-  controlsMenuOpen = !controlsMenuOpen;
+  const nextOpen = !controlsMenuOpen;
+  controlsMenuOpen = nextOpen;
   sessionMenuOpen = false;
   collaborationMenuOpen = false;
+  runtimeMenuOpen = false;
   renderMenus(snapshot);
+  if (nextOpen) {
+    focusToolApprovalOption(toolApprovalMode);
+  }
+});
+
+modeChipTray.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const mode = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-mode-chip]")?.dataset.modeChip;
+  if (isCollaborationMode(mode)) {
+    chooseCollaborationMode(mode);
+    return;
+  }
+  if (mode === "token") {
+    chooseTokenMode("economy");
+  }
 });
 
 controlsMenu.addEventListener("click", (event) => {
   event.stopPropagation();
+});
+
+runtimeSettingsMenu.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const action = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-runtime-action]")?.dataset.runtimeAction;
+  if (action === "model") {
+    runtimeMenuOpen = false;
+    renderMenus(snapshot);
+    vscode.postMessage({ command: "pickModel" });
+    return;
+  }
+  if (action === "effort") {
+    runtimeMenuOpen = false;
+    renderMenus(snapshot);
+    vscode.postMessage({ command: "pickEffort" });
+  }
 });
 
 sessionMenu.addEventListener("click", (event) => {
@@ -165,16 +272,22 @@ sessionMenu.addEventListener("click", (event) => {
   sessionMenuOpen = !sessionMenuOpen;
   collaborationMenuOpen = false;
   controlsMenuOpen = false;
+  runtimeMenuOpen = false;
   renderMenus(snapshot);
 });
 
-document.addEventListener("click", () => {
-  if (!sessionMenuOpen && !collaborationMenuOpen && !controlsMenuOpen) {
+document.addEventListener("click", (event) => {
+  const target = event.target as Node | null;
+  if (target !== prompt && (!target || !suggestionMenu.contains(target))) {
+    closeSuggestions();
+  }
+  if (!sessionMenuOpen && !collaborationMenuOpen && !controlsMenuOpen && !runtimeMenuOpen) {
     return;
   }
   sessionMenuOpen = false;
   collaborationMenuOpen = false;
   controlsMenuOpen = false;
+  runtimeMenuOpen = false;
   renderMenus(snapshot);
 });
 
@@ -183,24 +296,46 @@ collaborationMenu.addEventListener("click", (event) => {
   const target = event.target as Element | null;
   const collaboration = target?.closest<HTMLButtonElement>("button[data-collaboration-mode]")?.dataset.collaborationMode;
   if (isCollaborationMode(collaboration)) {
-    collaborationMode = collaborationMode === collaboration ? "normal" : collaboration;
-    collaborationMenuOpen = false;
-    render(snapshot);
+    chooseCollaborationMode(collaboration);
     return;
   }
   const token = target?.closest<HTMLButtonElement>("button[data-token-mode]")?.dataset.tokenMode;
   if (isTokenMode(token)) {
-    tokenMode = tokenMode === token ? "standard" : token;
-    collaborationMenuOpen = false;
-    render(snapshot);
+    chooseTokenMode(token);
   }
 });
 
 approvalModebar.addEventListener("click", (event) => {
   const mode = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-tool-approval-mode]")?.dataset.toolApprovalMode;
   if (isToolApprovalMode(mode)) {
-    toolApprovalMode = mode;
-    updateModeUi();
+    setToolApprovalMode(mode);
+    focusToolApprovalOption(mode);
+  }
+});
+
+approvalModebar.addEventListener("keydown", (event) => {
+  const activeMode = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-tool-approval-mode]")?.dataset.toolApprovalMode;
+  const currentIndex = Math.max(0, toolApprovalModes.indexOf(isToolApprovalMode(activeMode) ? activeMode : toolApprovalMode));
+  let nextIndex: number | undefined;
+  if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+    nextIndex = (currentIndex + 1) % toolApprovalModes.length;
+  } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+    nextIndex = (currentIndex + toolApprovalModes.length - 1) % toolApprovalModes.length;
+  } else if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = toolApprovalModes.length - 1;
+  } else if ((event.key === "Enter" || event.key === " ") && isToolApprovalMode(activeMode)) {
+    event.preventDefault();
+    setToolApprovalMode(activeMode);
+    return;
+  }
+
+  if (nextIndex !== undefined) {
+    event.preventDefault();
+    const nextMode = toolApprovalModes[nextIndex];
+    setToolApprovalMode(nextMode);
+    focusToolApprovalOption(nextMode);
   }
 });
 
@@ -291,6 +426,7 @@ settingsView.addEventListener("click", (event) => {
   if (action === "close") {
     settingsOpen = false;
     sessionMenuOpen = false;
+    runtimeMenuOpen = false;
     render(snapshot);
     return;
   }
@@ -356,8 +492,12 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
     case "notice":
       appendNotice(message.text);
       return;
+    case "resourceSuggestions":
+      receiveResourceSuggestions(message.requestId, message.query, message.items);
+      return;
     case "openSettings":
       settingsOpen = true;
+      closeSuggestions();
       render(snapshot);
       return;
   }
@@ -381,8 +521,12 @@ function render(state: Snapshot): void {
   newSession.textContent = "+";
   newSession.title = label("new");
   newSession.setAttribute("aria-label", label("new"));
-  modelButton.textContent = shortModelLabel(state.modelLabel);
-  modelButton.title = `${label("model")}: ${state.modelLabel}`;
+  runtimeModelLabel.textContent = shortModelLabel(state.modelLabel);
+  runtimeEffortLabel.textContent = shortEffortLabel(state.effortLabel);
+  runtimeSettingsButton.title = `${label("modelSettings")}: ${state.modelLabel} / ${state.effortLabel}`;
+  runtimeSettingsButton.setAttribute("aria-label", runtimeSettingsButton.title);
+  runtimeSettingsButton.setAttribute("aria-haspopup", "menu");
+  runtimeSettingsButton.setAttribute("aria-expanded", String(runtimeMenuOpen));
   settingsButton.textContent = "⚙";
   settingsButton.title = label("settings");
   settingsButton.setAttribute("aria-label", label("settings"));
@@ -390,11 +534,15 @@ function render(state: Snapshot): void {
   settingsModeTitle.textContent = label("settings");
   collaborationButton.title = label("collaborationModes");
   collaborationButton.setAttribute("aria-label", label("collaborationModes"));
+  collaborationButton.setAttribute("aria-haspopup", "menu");
+  collaborationButton.setAttribute("aria-expanded", String(collaborationMenuOpen));
   controlsApprovalLabel.textContent = label("toolApprovals");
-  controlSummaryButton.setAttribute("aria-label", label("composerControls"));
+  approvalSummaryButton.setAttribute("aria-label", label("toolApprovals"));
   composerHint.textContent = label("composerHint");
   prompt.placeholder = label("placeholder");
   newSession.disabled = state.running;
+  collaborationButton.disabled = state.running;
+  runtimeSettingsButton.disabled = state.running;
   chatToolbarActions.hidden = settingsOpen;
   settingsToolbarActions.hidden = !settingsOpen;
   transcript.hidden = settingsOpen;
@@ -404,7 +552,15 @@ function render(state: Snapshot): void {
     sessionMenuOpen = false;
     collaborationMenuOpen = false;
     controlsMenuOpen = false;
+    runtimeMenuOpen = false;
+    closeSuggestions();
   }
+  if (state.running) {
+    collaborationMenuOpen = false;
+    runtimeMenuOpen = false;
+  }
+  collaborationButton.setAttribute("aria-expanded", String(collaborationMenuOpen));
+  runtimeSettingsButton.setAttribute("aria-expanded", String(runtimeMenuOpen));
   updateSendButton(state);
   updateModeUi();
   renderMenus(state);
@@ -434,56 +590,102 @@ function updateSendButton(state: Snapshot): void {
 
 function updateModeUi(): void {
   approvalModebar.dataset.mode = toolApprovalMode;
+  approvalModebar.setAttribute("aria-label", label("toolApprovals"));
   for (const button of Array.from(approvalModebar.querySelectorAll<HTMLButtonElement>("button[data-tool-approval-mode]"))) {
     const mode = button.dataset.toolApprovalMode;
+    if (!isToolApprovalMode(mode)) {
+      continue;
+    }
     const selected = mode === toolApprovalMode;
-    button.classList.toggle("composer-modebar__item--active", selected);
-    button.setAttribute("aria-pressed", String(selected));
-    if (mode === "ask") {
-      button.textContent = label("ask");
-      button.title = label("askDetail");
-    } else if (mode === "auto") {
-      button.textContent = label("autoApproval");
-      button.title = label("autoApprovalDetail");
-    } else if (mode === "yolo") {
-      button.textContent = label("yolo");
-      button.title = label("yoloDetail");
+    const modeLabel = toolApprovalModeLabel(mode);
+    const modeDetail = toolApprovalModeDetail(mode);
+    button.classList.toggle("approval-menu__item--active", selected);
+    button.setAttribute("aria-checked", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    button.title = modeDetail;
+    const labelNode = button.querySelector<HTMLElement>("[data-approval-mode-label]");
+    const detailNode = button.querySelector<HTMLElement>("[data-approval-mode-detail]");
+    if (labelNode && detailNode) {
+      labelNode.textContent = modeLabel;
+      detailNode.textContent = modeDetail;
+    } else {
+      button.textContent = modeLabel;
     }
   }
-  renderControlSummary(snapshot);
+  renderControlSummaries();
+}
+
+function setToolApprovalMode(mode: ToolApprovalMode): void {
+  toolApprovalMode = mode;
+  updateModeUi();
+}
+
+function focusToolApprovalOption(mode: ToolApprovalMode): void {
+  approvalModebar.querySelector<HTMLButtonElement>(`button[data-tool-approval-mode="${mode}"]`)?.focus();
 }
 
 function renderMenus(state: Snapshot): void {
   renderSessionPopover(state);
-  renderCollaborationMenu();
+  renderCollaborationMenu(state);
   renderControlsMenu();
+  renderRuntimeSettingsMenu(state);
 }
 
-function renderControlSummary(state: Snapshot): void {
-  const parts: string[] = [];
+function renderControlSummaries(): void {
+  const approvalLabel = toolApprovalModeLabel(toolApprovalMode);
+  approvalSummaryButton.textContent = `${approvalLabel} ▾`;
+  approvalSummaryButton.title = `${label("toolApprovals")}: ${approvalLabel}`;
+
+  renderModeChips(snapshot);
+}
+
+function renderModeChips(state: Snapshot): void {
+  modeChipTray.textContent = "";
   if (collaborationMode === "plan") {
-    parts.push(label("plan"));
+    modeChipTray.append(modeChipButton("plan", label("plan"), label("planDetail"), "☰", state.running));
   } else if (collaborationMode === "goal") {
-    parts.push(label("goal"));
+    modeChipTray.append(modeChipButton("goal", label("goal"), label("goalActiveDetail"), "◎", state.running));
   }
-  parts.push(toolApprovalModeLabel(toolApprovalMode));
   if (tokenMode === "economy") {
-    parts.push(label("tokenEconomyShort"));
+    modeChipTray.append(modeChipButton("token", label("tokenEconomyShort"), label("tokenEconomyOnDetail"), "◜", state.running));
   }
-  controlSummaryButton.textContent = `${parts.join(" · ")} ▾`;
-  controlSummaryButton.title = parts.join(" · ");
+  modeChipTray.hidden = modeChipTray.childElementCount === 0;
 }
 
-function renderCollaborationMenu(): void {
+function modeChipButton(kind: CollaborationMode | "token", titleText: string, detailText: string, iconText: string, disabled: boolean): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `composer-mode-chip composer-mode-chip--${kind}`;
+  button.dataset.modeChip = kind;
+  button.disabled = disabled;
+  button.title = `${label("clickToDisable")}: ${detailText}`;
+  button.setAttribute("aria-label", button.title);
+
+  const modeIcon = document.createElement("span");
+  modeIcon.className = "composer-mode-chip__icon composer-mode-chip__icon--mode";
+  modeIcon.textContent = iconText;
+  modeIcon.setAttribute("aria-hidden", "true");
+  const dismissIcon = document.createElement("span");
+  dismissIcon.className = "composer-mode-chip__icon composer-mode-chip__icon--dismiss";
+  dismissIcon.textContent = "×";
+  dismissIcon.setAttribute("aria-hidden", "true");
+  const labelNode = document.createElement("span");
+  labelNode.className = "composer-mode-chip__label";
+  labelNode.textContent = titleText;
+  button.append(modeIcon, dismissIcon, labelNode);
+  return button;
+}
+
+function renderCollaborationMenu(state: Snapshot): void {
   collaborationMenu.textContent = "";
   const title = document.createElement("div");
   title.className = "collaboration-menu__title";
   title.textContent = label("collaborationModes");
   collaborationMenu.append(
     title,
-    collaborationMenuRow("plan", label("plan"), label("planDetail"), "☰"),
-    collaborationMenuRow("goal", label("goal"), label("goalDetail"), "◎"),
-    tokenMenuRow("economy", label("tokenEconomy"), label("tokenEconomyDetail"), "◜"),
+    collaborationMenuRow("plan", label("plan"), label("planDetail"), "☰", state.running),
+    collaborationMenuRow("goal", label("goal"), collaborationMode === "goal" ? label("goalActiveDetail") : label("goalDetail"), "◎", state.running),
+    tokenMenuRow("economy", label("tokenEconomy"), tokenMode === "economy" ? label("tokenEconomyOnDetail") : label("tokenEconomyDetail"), "◜", state.running),
   );
   collaborationMenu.hidden = !collaborationMenuOpen;
 }
@@ -492,22 +694,70 @@ function renderControlsMenu(): void {
   controlsMenu.hidden = !controlsMenuOpen;
 }
 
-function collaborationMenuRow(mode: CollaborationMode, titleText: string, detailText: string, iconText: string): HTMLButtonElement {
-  const button = menuToggleRow(titleText, detailText, iconText, collaborationMode === mode);
+function renderRuntimeSettingsMenu(state: Snapshot): void {
+  runtimeSettingsMenu.textContent = "";
+  runtimeSettingsButton.setAttribute("aria-expanded", String(runtimeMenuOpen));
+  const title = document.createElement("div");
+  title.className = "runtime-settings-menu__title";
+  title.textContent = label("modelSettings");
+  runtimeSettingsMenu.append(
+    title,
+    runtimeSettingsRow("model", label("model"), state.modelLabel, "✿", state.running),
+    runtimeSettingsRow(
+      "effort",
+      label("reasoningEffort"),
+      state.effortSupported ? state.effortLabel : label("effortUnavailable"),
+      "◜",
+      state.running,
+    ),
+  );
+  runtimeSettingsMenu.hidden = !runtimeMenuOpen;
+}
+
+function runtimeSettingsRow(action: "model" | "effort", titleText: string, detailText: string, iconText: string, disabled: boolean): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "runtime-settings-menu__row";
+  button.dataset.runtimeAction = action;
+  button.disabled = disabled;
+  button.title = detailText;
+  const icon = document.createElement("span");
+  icon.className = "runtime-settings-menu__icon";
+  icon.textContent = iconText;
+  const copy = document.createElement("span");
+  copy.className = "runtime-settings-menu__copy";
+  const title = document.createElement("strong");
+  title.textContent = titleText;
+  const detail = document.createElement("small");
+  detail.textContent = detailText;
+  const chevron = document.createElement("span");
+  chevron.className = "runtime-settings-menu__chevron";
+  chevron.textContent = "›";
+  chevron.setAttribute("aria-hidden", "true");
+  copy.append(title, detail);
+  button.append(icon, copy, chevron);
+  return button;
+}
+
+function collaborationMenuRow(mode: CollaborationMode, titleText: string, detailText: string, iconText: string, disabled: boolean): HTMLButtonElement {
+  const button = menuToggleRow(titleText, detailText, iconText, collaborationMode === mode, disabled);
   button.dataset.collaborationMode = mode;
   return button;
 }
 
-function tokenMenuRow(mode: TokenMode, titleText: string, detailText: string, iconText: string): HTMLButtonElement {
-  const button = menuToggleRow(titleText, detailText, iconText, tokenMode === mode);
+function tokenMenuRow(mode: TokenMode, titleText: string, detailText: string, iconText: string, disabled: boolean): HTMLButtonElement {
+  const button = menuToggleRow(titleText, detailText, iconText, tokenMode === mode, disabled);
   button.dataset.tokenMode = mode;
   return button;
 }
 
-function menuToggleRow(titleText: string, detailText: string, iconText: string, selected: boolean): HTMLButtonElement {
+function menuToggleRow(titleText: string, detailText: string, iconText: string, selected: boolean, disabled: boolean): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = selected ? "collaboration-menu__row selected" : "collaboration-menu__row";
+  button.disabled = disabled;
+  button.title = detailText;
+  button.setAttribute("aria-pressed", String(selected));
   const icon = document.createElement("span");
   icon.className = "collaboration-menu__icon";
   icon.textContent = iconText;
@@ -523,6 +773,28 @@ function menuToggleRow(titleText: string, detailText: string, iconText: string, 
   copy.append(title, detail);
   button.append(icon, copy, toggle);
   return button;
+}
+
+function chooseCollaborationMode(mode: CollaborationMode): void {
+  collaborationMode = collaborationMode === mode ? "normal" : mode;
+  collaborationMenuOpen = false;
+  runtimeMenuOpen = false;
+  render(snapshot);
+  focusPromptSoon();
+}
+
+function chooseTokenMode(mode: TokenMode): void {
+  tokenMode = tokenMode === mode ? "standard" : mode;
+  collaborationMenuOpen = false;
+  runtimeMenuOpen = false;
+  render(snapshot);
+  focusPromptSoon();
+}
+
+function focusPromptSoon(): void {
+  requestAnimationFrame(() => {
+    prompt.focus();
+  });
 }
 
 function renderSessionPopover(state: Snapshot): void {
@@ -790,7 +1062,20 @@ function renderEmptyState(state: Snapshot): HTMLElement {
   node.className = "empty-state";
   const mark = document.createElement("div");
   mark.className = "reasonix-mark";
-  mark.textContent = "R";
+  const markSrc = document.body.dataset.reasonixMarkSrc;
+  if (markSrc) {
+    const logo = document.createElement("img");
+    logo.className = "reasonix-mark__logo";
+    logo.src = markSrc;
+    logo.alt = "";
+    logo.decoding = "async";
+    logo.addEventListener("error", () => {
+      mark.textContent = "R";
+    }, { once: true });
+    mark.append(logo);
+  } else {
+    mark.textContent = "R";
+  }
   const title = document.createElement("div");
   title.className = "empty-title";
   title.textContent = label("whatCanIDo");
@@ -1155,6 +1440,195 @@ function codeBlock(code: string, language: string): HTMLElement {
   return node;
 }
 
+function updateComposerSuggestions(): void {
+  if (compositionActive || settingsOpen) {
+    closeSuggestions();
+    return;
+  }
+  const trigger = getComposerTrigger(prompt.value, prompt.selectionStart, prompt.selectionEnd);
+  if (!trigger) {
+    closeSuggestions();
+    return;
+  }
+  if (trigger.kind === "slash") {
+    suggestionState = {
+      trigger,
+      items: slashSuggestions(trigger.query, snapshot.locale).map(slashMenuItem),
+      selectedIndex: 0,
+      loading: false,
+    };
+    renderSuggestionMenu();
+    return;
+  }
+
+  const requestId = ++resourceSuggestionRequestId;
+  suggestionState = {
+    trigger,
+    items: [],
+    selectedIndex: 0,
+    resourceRequestId: requestId,
+    loading: true,
+  };
+  renderSuggestionMenu();
+  vscode.postMessage({ command: "resourceSuggestions", requestId, query: trigger.query });
+}
+
+function handleSuggestionKeydown(event: KeyboardEvent): boolean {
+  if (!suggestionState.trigger || suggestionMenu.hidden) {
+    return false;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    moveSuggestionSelection(event.key === "ArrowDown" ? 1 : -1);
+    return true;
+  }
+  if (event.key === "Tab" || event.key === "Enter") {
+    if (suggestionState.items.length === 0) {
+      return false;
+    }
+    event.preventDefault();
+    acceptSuggestion(suggestionState.selectedIndex);
+    return true;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeSuggestions();
+    return true;
+  }
+  return false;
+}
+
+function receiveResourceSuggestions(requestId: number, query: string, items: ResourceSuggestion[]): void {
+  const trigger = suggestionState.trigger;
+  if (trigger?.kind !== "resource" || suggestionState.resourceRequestId !== requestId || trigger.query !== query) {
+    return;
+  }
+  suggestionState = {
+    trigger,
+    items: items.map(resourceMenuItem),
+    selectedIndex: 0,
+    resourceRequestId: requestId,
+    loading: false,
+  };
+  renderSuggestionMenu();
+}
+
+function moveSuggestionSelection(delta: number): void {
+  const length = suggestionState.items.length;
+  if (length === 0) {
+    return;
+  }
+  suggestionState.selectedIndex = (suggestionState.selectedIndex + delta + length) % length;
+  renderSuggestionMenu();
+}
+
+function acceptSuggestion(index: number): void {
+  const trigger = suggestionState.trigger;
+  const item = suggestionState.items[index];
+  if (!trigger || !item) {
+    return;
+  }
+  const next = replaceComposerTrigger(prompt.value, trigger, item.insertText);
+  prompt.value = next.value;
+  prompt.focus();
+  prompt.setSelectionRange(next.cursor, next.cursor);
+  resizePrompt();
+  updateSendButton(snapshot);
+  closeSuggestions();
+}
+
+function closeSuggestions(): void {
+  if (!suggestionState.trigger && suggestionMenu.hidden) {
+    return;
+  }
+  suggestionState = emptySuggestionState();
+  renderSuggestionMenu();
+}
+
+function renderSuggestionMenu(): void {
+  suggestionMenu.textContent = "";
+  const trigger = suggestionState.trigger;
+  if (!trigger) {
+    suggestionMenu.hidden = true;
+    return;
+  }
+  suggestionMenu.hidden = false;
+  suggestionMenu.setAttribute("aria-label", trigger.kind === "slash" ? label("slashCommands") : label("workspaceFiles"));
+
+  const title = document.createElement("div");
+  title.className = "suggestion-menu__title";
+  title.textContent = trigger.kind === "slash" ? label("slashCommands") : label("workspaceFiles");
+  suggestionMenu.append(title);
+
+  if (suggestionState.loading) {
+    const loading = document.createElement("div");
+    loading.className = "suggestion-menu__empty";
+    loading.textContent = label("searchingFiles");
+    suggestionMenu.append(loading);
+    return;
+  }
+  if (suggestionState.items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "suggestion-menu__empty";
+    empty.textContent = label("noSuggestions");
+    suggestionMenu.append(empty);
+    return;
+  }
+  suggestionState.items.forEach((item, index) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = index === suggestionState.selectedIndex ? "suggestion-menu__row selected" : "suggestion-menu__row";
+    row.dataset.suggestionIndex = String(index);
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(index === suggestionState.selectedIndex));
+
+    const icon = document.createElement("span");
+    icon.className = "suggestion-menu__icon";
+    icon.textContent = item.icon;
+    const copy = document.createElement("span");
+    copy.className = "suggestion-menu__copy";
+    const primary = document.createElement("strong");
+    primary.textContent = item.title;
+    const detail = document.createElement("small");
+    detail.textContent = item.detail;
+    copy.append(primary, detail);
+    const badge = document.createElement("span");
+    badge.className = "suggestion-menu__badge";
+    badge.textContent = item.badge;
+    row.append(icon, copy, badge);
+    suggestionMenu.append(row);
+  });
+}
+
+function slashMenuItem(suggestion: ReturnType<typeof slashSuggestions>[number]): ComposerMenuItem {
+  const aliases = suggestion.aliases.map((alias) => `/${alias}`).join(", ");
+  return {
+    icon: "/",
+    title: `/${suggestion.name}`,
+    detail: aliases ? `${suggestion.detail} · ${aliases}` : suggestion.detail,
+    badge: label("command"),
+    insertText: suggestion.insertText,
+  };
+}
+
+function resourceMenuItem(suggestion: ResourceSuggestion): ComposerMenuItem {
+  return {
+    icon: "@",
+    title: suggestion.label,
+    detail: suggestion.detail,
+    badge: suggestion.kind === "directory" ? label("folder") : label("file"),
+    insertText: suggestion.insertText,
+  };
+}
+
+function emptySuggestionState(): SuggestionState {
+  return {
+    items: [],
+    selectedIndex: 0,
+    loading: false,
+  };
+}
+
 function updateSetting(key: SettingKey, value: string | boolean): void {
   vscode.postMessage({ command: "updateSetting", key, value });
 }
@@ -1185,6 +1659,7 @@ function submitPrompt(): void {
   prompt.value = "";
   resizePrompt();
   updateSendButton(snapshot);
+  closeSuggestions();
 }
 
 function resizePrompt(): void {
@@ -1201,6 +1676,8 @@ function emptySnapshot(): Snapshot {
     workspace: "No workspace",
     contextMode: "selectionOnly",
     modelLabel: "Default model",
+    effortLabel: "auto",
+    effortSupported: false,
     locale: "en",
     uiLanguage: "auto",
     settings: {
@@ -1230,6 +1707,8 @@ function normalizeSnapshot(value: unknown): Snapshot {
     contextMode,
     usage: isRecord(value.usage) ? (value.usage as unknown as UsageData) : undefined,
     modelLabel: typeof value.modelLabel === "string" ? value.modelLabel : "Default model",
+    effortLabel: typeof value.effortLabel === "string" ? value.effortLabel : "auto",
+    effortSupported: value.effortSupported === true,
     cacheLabel: typeof value.cacheLabel === "string" ? value.cacheLabel : undefined,
     locale: typeof value.locale === "string" ? value.locale : "en",
     uiLanguage: isUiLanguage(value.uiLanguage) ? value.uiLanguage : "auto",
@@ -1308,6 +1787,17 @@ function toolApprovalModeLabel(mode: ToolApprovalMode): string {
       return label("autoApproval");
     case "yolo":
       return label("yolo");
+  }
+}
+
+function toolApprovalModeDetail(mode: ToolApprovalMode): string {
+  switch (mode) {
+    case "ask":
+      return label("askDetail");
+    case "auto":
+      return label("autoApprovalDetail");
+    case "yolo":
+      return label("yoloDetail");
   }
 }
 
@@ -1435,6 +1925,11 @@ function shortModelLabel(value: string): string {
   return compact.length > 16 ? `${compact.slice(0, 15)}...` : compact;
 }
 
+function shortEffortLabel(value: string): string {
+  const trimmed = value.trim() || "auto";
+  return trimmed.length > 10 ? `${trimmed.slice(0, 9)}...` : trimmed;
+}
+
 function relativeTime(value: number): string {
   const delta = Date.now() - value;
   const minute = 60_000;
@@ -1539,6 +2034,7 @@ type LabelKey =
   | "cancelled"
   | "code"
   | "completed"
+  | "command"
   | "clickToDisable"
   | "collaborationModes"
   | "composerControls"
@@ -1555,7 +2051,10 @@ type LabelKey =
   | "english"
   | "execute"
   | "explainFile"
+  | "effortUnavailable"
   | "failed"
+  | "file"
+  | "folder"
   | "fixSelection"
   | "idleTitle"
   | "input"
@@ -1565,15 +2064,18 @@ type LabelKey =
   | "language"
   | "logs"
   | "model"
+  | "modelSettings"
   | "modelOverride"
   | "modelPlaceholder"
   | "mcpServers"
   | "goal"
+  | "goalActiveDetail"
   | "goalDetail"
   | "nearby"
   | "nearbyDetail"
   | "new"
   | "noContext"
+  | "noSuggestions"
   | "noSessions"
   | "none"
   | "notice"
@@ -1593,11 +2095,13 @@ type LabelKey =
   | "read"
   | "readyTitle"
   | "reasoning"
+  | "reasoningEffort"
   | "reject"
   | "result"
   | "retry"
   | "runTests"
   | "search"
+  | "searchingFiles"
   | "searchRepo"
   | "selected"
   | "selection"
@@ -1607,6 +2111,7 @@ type LabelKey =
   | "session"
   | "sessions"
   | "settings"
+  | "slashCommands"
   | "start"
   | "stop"
   | "stopTurn"
@@ -1615,12 +2120,16 @@ type LabelKey =
   | "tokens"
   | "tokenEconomy"
   | "tokenEconomyDetail"
+  | "tokenEconomyOnDetail"
   | "tokenEconomyShort"
+  | "tokenStandardDetail"
+  | "tokenStandardShort"
   | "toolApprovals"
   | "trace"
   | "usage"
   | "user"
   | "whatCanIDo"
+  | "workspaceFiles"
   | "yolo"
   | "yoloDetail"
   | "chinese"
@@ -1651,6 +2160,7 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     cancelled: "cancelled",
     code: "code",
     completed: "completed",
+    command: "command",
     clickToDisable: "Click to turn off",
     collaborationModes: "Collaboration modes",
     composerControls: "Composer controls",
@@ -1667,7 +2177,10 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     english: "English",
     execute: "execute",
     explainFile: "Explain file",
+    effortUnavailable: "Reasoning effort is unavailable for this model",
     failed: "failed",
+    file: "file",
+    folder: "folder",
     fixSelection: "Fix selection",
     idleTitle: "Reasonix is idle",
     input: "Input",
@@ -1677,15 +2190,18 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     language: "Language",
     logs: "Logs",
     model: "Model",
+    modelSettings: "Model settings",
     modelOverride: "Model override",
     modelPlaceholder: "Default model",
     mcpServers: "MCP servers",
     goal: "Goal",
+    goalActiveDetail: "Keeps working until complete, blocked, or stopped.",
     goalDetail: "Keep working toward a concrete goal until done or blocked.",
     nearby: "Nearby code",
     nearbyDetail: "Use selected text, or a cursor window when nothing is selected.",
     new: "New",
     noContext: "No active editor context",
+    noSuggestions: "No matches",
     noSessions: "No recent sessions",
     none: "None",
     notice: "notice",
@@ -1705,11 +2221,13 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     read: "read",
     readyTitle: "Ready",
     reasoning: "Reasoning",
+    reasoningEffort: "Reasoning effort",
     reject: "Reject",
     result: "Result",
     retry: "Retry",
     runTests: "Run tests",
     search: "search",
+    searchingFiles: "Searching files...",
     searchRepo: "Search repo",
     selected: "selected",
     selection: "Selection",
@@ -1719,6 +2237,7 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     session: "Session",
     sessions: "Sessions",
     settings: "Settings",
+    slashCommands: "Slash commands",
     start: "Start",
     stop: "Stop",
     stopTurn: "Stop turn",
@@ -1727,12 +2246,16 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     tokens: "Tokens",
     tokenEconomy: "Token economy",
     tokenEconomyDetail: "Start lean and expand context/tools only when needed.",
+    tokenEconomyOnDetail: "Initial context is lean; extras are enabled on demand.",
     tokenEconomyShort: "Eco",
+    tokenStandardDetail: "Send with standard context and tool availability.",
+    tokenStandardShort: "Std",
     toolApprovals: "Tool approvals",
     trace: "Trace",
     usage: "usage",
     user: "user",
     whatCanIDo: "What can I do for you?",
+    workspaceFiles: "Workspace files",
     yolo: "Yolo",
     yoloDetail: "Skip ordinary tool approvals for this turn; ask and plan decisions still wait.",
     chinese: "Chinese",
@@ -1762,6 +2285,7 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     cancelled: "已取消",
     code: "代码",
     completed: "已完成",
+    command: "命令",
     clickToDisable: "点击关闭",
     collaborationModes: "协作方式",
     composerControls: "输入控制",
@@ -1778,7 +2302,10 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     english: "英文",
     execute: "执行",
     explainFile: "解释文件",
+    effortUnavailable: "当前模型不支持调整推理强度",
     failed: "失败",
+    file: "文件",
+    folder: "文件夹",
     fixSelection: "修复选区",
     idleTitle: "Reasonix 空闲中",
     input: "输入",
@@ -1788,15 +2315,18 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     language: "语言",
     logs: "日志",
     model: "模型",
+    modelSettings: "模型设置",
     modelOverride: "模型覆盖",
     modelPlaceholder: "默认模型",
     mcpServers: "MCP 服务",
     goal: "目标",
+    goalActiveDetail: "持续推进，直到完成、阻塞或停止。",
     goalDetail: "围绕明确目标持续推进，直到完成或阻塞。",
     nearby: "附近代码",
     nearbyDetail: "优先使用选区，没有选区时使用光标附近代码。",
     new: "新建",
     noContext: "没有可用编辑器上下文",
+    noSuggestions: "没有匹配项",
     noSessions: "暂无最近会话",
     none: "无",
     notice: "通知",
@@ -1816,11 +2346,13 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     read: "读取",
     readyTitle: "准备就绪",
     reasoning: "推理",
+    reasoningEffort: "推理强度",
     reject: "拒绝",
     result: "结果",
     retry: "重试",
     runTests: "运行测试",
     search: "搜索",
+    searchingFiles: "正在搜索文件...",
     searchRepo: "搜索仓库",
     selected: "已选择",
     selection: "仅选区",
@@ -1830,6 +2362,7 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     session: "会话",
     sessions: "会话",
     settings: "设置",
+    slashCommands: "斜杠命令",
     start: "开始",
     stop: "停止",
     stopTurn: "停止当前回合",
@@ -1838,12 +2371,16 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     tokens: "Tokens",
     tokenEconomy: "省 token",
     tokenEconomyDetail: "精简初始上下文和工具，需要时再扩展。",
+    tokenEconomyOnDetail: "已精简初始上下文；需要时按需启用额外资源。",
     tokenEconomyShort: "省",
+    tokenStandardDetail: "使用标准上下文和工具可用性发送。",
+    tokenStandardShort: "标准",
     toolApprovals: "工具权限",
     trace: "追踪日志",
     usage: "用量",
     user: "用户",
     whatCanIDo: "我能帮你做什么？",
+    workspaceFiles: "工作区文件",
     yolo: "Yolo",
     yoloDetail: "本轮跳过普通工具审批；ask 问题和计划确认仍会等待。",
     chinese: "简体中文",

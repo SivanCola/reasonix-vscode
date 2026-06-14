@@ -3,14 +3,22 @@ export type SlashExpansion = {
   command?: string;
 };
 
+export type SlashCommandInfo = {
+  name: string;
+  aliases: string[];
+  description: string;
+};
+
 type SlashCommand = {
   names: string[];
+  description: string;
   build: (args: string) => string;
 };
 
 const commands: SlashCommand[] = [
   {
     names: ["help", "?"],
+    description: "Show the built-in Reasonix slash commands.",
     build: () => [
       "List the built-in Reasonix VS Code slash commands and when to use them.",
       "",
@@ -19,6 +27,7 @@ const commands: SlashCommand[] = [
   },
   {
     names: ["explain"],
+    description: "Explain referenced code, files, or workspace areas.",
     build: (args) => withRequest(
       "Explain the referenced code, file, or workspace area. Focus on purpose, important flows, and risky edges.",
       args,
@@ -26,6 +35,7 @@ const commands: SlashCommand[] = [
   },
   {
     names: ["fix"],
+    description: "Fix a referenced issue or code area.",
     build: (args) => withRequest(
       "Fix the referenced issue or code. Keep the change focused, preserve existing behavior, and explain what changed.",
       args,
@@ -33,6 +43,7 @@ const commands: SlashCommand[] = [
   },
   {
     names: ["tests", "test"],
+    description: "Run, identify, or diagnose relevant tests.",
     build: (args) => withRequest(
       "Run or identify the relevant tests for this workspace. If failures appear, diagnose the likely cause and propose the smallest fix.",
       args,
@@ -40,6 +51,7 @@ const commands: SlashCommand[] = [
   },
   {
     names: ["search"],
+    description: "Search the repository and summarize key files.",
     build: (args) => withRequest(
       "Search the repository for the referenced implementation, summarize what you find, and point to the key files.",
       args,
@@ -47,6 +59,7 @@ const commands: SlashCommand[] = [
   },
   {
     names: ["mcp"],
+    description: "Inspect connected MCP context and use relevant tools.",
     build: (args) => withRequest(
       "Inspect the connected MCP context and use MCP tools only when they are relevant to the request. Summarize which MCP server or tool was useful.",
       args,
@@ -54,12 +67,21 @@ const commands: SlashCommand[] = [
   },
   {
     names: ["skills", "skill"],
+    description: "Use the appropriate available Reasonix/Codex skills.",
     build: (args) => withRequest(
       "Use the appropriate Reasonix/Codex skills for this request if they are available. State which skill is relevant and what it contributes.",
       args,
     ),
   },
 ];
+
+export function listSlashCommands(): SlashCommandInfo[] {
+  return commands.map((command) => ({
+    name: command.names[0] ?? "",
+    aliases: command.names.slice(1),
+    description: command.description,
+  }));
+}
 
 export function expandSlashCommand(input: string): SlashExpansion {
   const trimmedStart = input.trimStart();

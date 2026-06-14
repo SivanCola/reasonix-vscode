@@ -16,6 +16,7 @@ import { appendApproval, appendNotice, appendUserMessage, applySessionUpdate, re
 import { buildEditorContext, buildEditorContextInfo, configuredSelectionMode, type IncludeSelectionMode } from "./editorContext";
 import { DiffPreviewProvider } from "./preview";
 import { appendFileMentions } from "./resourceMentions";
+import { suggestWorkspaceResources } from "./resourceSuggestions";
 import { redactLocalPaths } from "./sanitize";
 import { expandSlashCommand } from "./slashCommands";
 import { parseWebviewMessage } from "./webviewProtocol";
@@ -40,6 +41,8 @@ type ChatSnapshot = WorkspaceChatState & {
   workspace: string;
   contextMode: string;
   modelLabel: string;
+  effortLabel: string;
+  effortSupported: boolean;
   cacheLabel?: string;
   locale: string;
   uiLanguage: UiLanguage;
@@ -102,6 +105,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("reasonix.sendSelection", () => provider.sendSelection()),
     vscode.commands.registerCommand("reasonix.cancelTurn", () => provider.cancelTurn()),
     vscode.commands.registerCommand("reasonix.pickModel", () => provider.pickModel()),
+    vscode.commands.registerCommand("reasonix.pickEffort", () => provider.pickEffort()),
     vscode.commands.registerCommand("reasonix.pickUiLanguage", () => provider.pickUiLanguage()),
     vscode.commands.registerCommand("reasonix.openSettings", () => provider.openSettings()),
     vscode.commands.registerCommand("reasonix.showOutput", () => output.show()),
@@ -268,9 +272,9 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
 
     let selectedEffort = picked.model.effort;
     if (picked.model.effortSupported && picked.model.effortLevels && picked.model.effortLevels.length > 0) {
-      const effort = await vscode.window.showQuickPick(picked.model.effortLevels, {
+      const effort = await vscode.window.showQuickPick(unique(["auto", ...picked.model.effortLevels]), {
         title: `Reasonix effort for ${picked.model.ref}`,
-        placeHolder: picked.model.effort ?? picked.model.defaultEffort ?? "auto",
+        placeHolder: picked.model.effort ?? "auto",
       });
       if (effort) {
         try {
@@ -296,6 +300,80 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     state.disconnected = true;
     state.status = `Model: ${picked.model.ref}`;
     await this.context.workspaceState.update(this.sessionStorageKey(folder), undefined);
+    this.postSnapshot();
+  }
+
+  async pickEffort(): Promise<void> {
+    const folder = this.currentWorkspaceFolder();
+    if (!folder) {
+      void vscode.window.showErrorMessage("Open a workspace folder before switching effort.");
+      return;
+    }
+    const state = this.stateFor(folder);
+    if (state.running) {
+      void vscode.window.showWarningMessage("Reasonix is running. Cancel the current turn before switching effort.");
+      return;
+    }
+    const client = await this.ensureClient(folder);
+    if (!client) {
+      return;
+    }
+    let models: ModelListResult;
+    try {
+      models = await client.listModels();
+    } catch (err) {
+      state.status = "Model list unavailable";
+      this.appendOutput(`Reasonix effort list unavailable: ${errorMessage(err)}`, folder);
+      this.postSnapshot();
+      void vscode.window.showInformationMessage("The active Reasonix ACP backend does not expose effort switching yet.");
+      return;
+    }
+
+    const current = this.currentModelFromList(models.models);
+    state.models = models.models;
+    if (!current || !current.effortSupported) {
+      this.postSnapshot();
+      void vscode.window.showInformationMessage("The current model does not expose configurable reasoning effort.");
+      return;
+    }
+
+    const effortLevels = unique(["auto", ...(current.effortLevels ?? [])]);
+    if (effortLevels.length === 0) {
+      this.postSnapshot();
+      void vscode.window.showInformationMessage("The current model does not expose configurable reasoning effort.");
+      return;
+    }
+
+    const picked = await vscode.window.showQuickPick(
+      effortLevels.map((level) => ({
+        label: level,
+        description: level === (current.effort ?? "auto") ? "current" : level === current.defaultEffort ? "model default" : "",
+        level,
+      })),
+      {
+        title: `Reasonix effort for ${current.ref}`,
+        placeHolder: current.effort ?? "auto",
+      },
+    );
+    if (!picked) {
+      this.postSnapshot();
+      return;
+    }
+
+    try {
+      await client.setEffort(current.ref, picked.level);
+    } catch (err) {
+      this.appendOutput(`Reasonix effort update failed: ${errorMessage(err)}`, folder);
+      void vscode.window.showWarningMessage("Reasonix could not update the effort level for this backend.");
+      this.postSnapshot();
+      return;
+    }
+
+    state.models = models.models.map((model) => ({
+      ...model,
+      effort: model.ref === current.ref ? picked.level : model.effort,
+    }));
+    state.status = `Effort: ${picked.level}`;
     this.postSnapshot();
   }
 
@@ -366,6 +444,9 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       case "pickModel":
         await this.pickModel();
         return;
+      case "pickEffort":
+        await this.pickEffort();
+        return;
       case "pickUiLanguage":
         await this.pickUiLanguage();
         return;
@@ -404,6 +485,9 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
         return;
       case "approvalDecision":
         this.resolveApproval(message.id, message.optionId);
+        return;
+      case "resourceSuggestions":
+        await this.postResourceSuggestions(message.requestId, message.query);
         return;
       case "stateSnapshot":
         this.postSnapshot();
@@ -517,6 +601,12 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
     } catch {
       // Ignore malformed links sent by the webview.
     }
+  }
+
+  private async postResourceSuggestions(requestId: number, query: string): Promise<void> {
+    const folder = this.currentWorkspaceFolder();
+    const items = folder ? await suggestWorkspaceResources(query, folder.uri.fsPath) : [];
+    void this.view?.webview.postMessage({ type: "resourceSuggestions", requestId, query, items });
   }
 
   private async insertMessage(index: number): Promise<void> {
@@ -900,6 +990,8 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       workspace: folder?.name ?? "No workspace",
       contextMode,
       modelLabel: this.modelLabel(state),
+      effortLabel: this.effortLabel(state),
+      effortSupported: this.effortSupported(state),
       cacheLabel: state.usage ? cacheBrief(state.usage) : undefined,
       locale: effectiveUiLocale(),
       uiLanguage: configuredUiLanguage(),
@@ -912,30 +1004,49 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
 
   private modelLabel(state: WorkspaceChatState): string {
     const configured = vscode.workspace.getConfiguration("reasonix").get<string>("model", "").trim();
-    const current = state.models?.find((model) => model.ref === configured) ?? state.models?.find((model) => model.current);
+    const current = this.currentModel(state);
     if (configured) {
-      return current?.effort ? `${configured} / ${current.effort}` : configured;
+      return configured;
     }
     if (current) {
-      return current.effort ? `${current.ref} / ${current.effort}` : current.ref;
+      return current.ref;
     }
     return "Default model";
+  }
+
+  private effortLabel(state: WorkspaceChatState): string {
+    return this.currentModel(state)?.effort ?? "auto";
+  }
+
+  private effortSupported(state: WorkspaceChatState): boolean {
+    const current = this.currentModel(state);
+    return Boolean(current?.effortSupported && (current.effortLevels?.length ?? 0) > 0);
+  }
+
+  private currentModel(state: WorkspaceChatState): ModelInfo | undefined {
+    return this.currentModelFromList(state.models);
+  }
+
+  private currentModelFromList(models: ModelInfo[] | undefined): ModelInfo | undefined {
+    const configured = vscode.workspace.getConfiguration("reasonix").get<string>("model", "").trim();
+    return models?.find((model) => model.ref === configured) ?? models?.find((model) => model.current);
   }
 
   private html(webview: vscode.Webview): string {
     const nonce = getNonce();
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "webview.js"));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "styles.css"));
+    const markUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "mark.svg"));
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
   <link rel="stylesheet" href="${styleUri}">
   <title>Reasonix</title>
 </head>
-<body>
+<body data-reasonix-mark-src="${markUri}">
   <div class="shell">
     <header class="topbar">
       <div class="brand-stack">
@@ -944,7 +1055,6 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
           <span id="statusDot" class="status-dot"></span>
           <span id="status" class="status">Idle</span>
           <span id="workspaceName" class="workspace-name"></span>
-          <button id="modelButton" class="top-model-chip" title="Pick model and effort" aria-label="Pick model and effort" type="button">Model</button>
           <span id="toolbarMeta" class="toolbar-meta"></span>
         </div>
       </div>
@@ -967,26 +1077,56 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider {
       <div class="input-wrap">
         <textarea id="prompt" rows="3" placeholder="Type your task here..."></textarea>
         <div id="composerHint" class="composer-hint">Type @ for context, / for slash command...</div>
+        <div id="suggestionMenu" class="suggestion-menu" role="listbox" hidden></div>
         <button id="send" class="send-button" type="submit" aria-label="Send">↑</button>
       </div>
       <div class="composer-footer">
         <div class="collaboration-control">
           <button id="collaborationButton" class="footer-icon tune" title="Collaboration modes" aria-label="Collaboration modes" type="button">☷</button>
+          <div id="modeChipTray" class="mode-chip-tray" aria-live="polite"></div>
           <div id="collaborationMenu" class="popover collaboration-menu" hidden></div>
         </div>
         <div class="controls-control">
-          <button id="controlSummaryButton" class="control-summary" type="button"></button>
+          <button id="approvalSummaryButton" class="control-summary approval-summary" type="button"></button>
           <div id="controlsMenu" class="popover controls-menu" hidden>
             <div class="controls-section">
               <div id="controlsApprovalLabel" class="controls-label">Tool approvals</div>
-              <div id="approvalModebar" class="composer-modebar composer-modebar--approval" data-mode="ask" title="Tool approval mode">
-                <span class="composer-modebar__thumb" aria-hidden="true"></span>
-                <button id="approvalAsk" class="composer-modebar__item" type="button" data-tool-approval-mode="ask">询问</button>
-                <button id="approvalAuto" class="composer-modebar__item" type="button" data-tool-approval-mode="auto">自动</button>
-                <button id="approvalYolo" class="composer-modebar__item" type="button" data-tool-approval-mode="yolo">Yolo</button>
+              <div id="approvalModebar" class="approval-menu" data-mode="ask" role="menu" aria-orientation="vertical" aria-label="Tool approval mode">
+                <button id="approvalAsk" class="approval-menu__item" type="button" role="menuitemradio" data-tool-approval-mode="ask">
+                  <span class="approval-menu__check" aria-hidden="true">✓</span>
+                  <span class="approval-menu__copy">
+                    <span class="approval-menu__label" data-approval-mode-label></span>
+                    <span class="approval-menu__detail" data-approval-mode-detail></span>
+                  </span>
+                </button>
+                <button id="approvalAuto" class="approval-menu__item" type="button" role="menuitemradio" data-tool-approval-mode="auto">
+                  <span class="approval-menu__check" aria-hidden="true">✓</span>
+                  <span class="approval-menu__copy">
+                    <span class="approval-menu__label" data-approval-mode-label></span>
+                    <span class="approval-menu__detail" data-approval-mode-detail></span>
+                  </span>
+                </button>
+                <button id="approvalYolo" class="approval-menu__item" type="button" role="menuitemradio" data-tool-approval-mode="yolo">
+                  <span class="approval-menu__check" aria-hidden="true">✓</span>
+                  <span class="approval-menu__copy">
+                    <span class="approval-menu__label" data-approval-mode-label></span>
+                    <span class="approval-menu__detail" data-approval-mode-detail></span>
+                  </span>
+                </button>
               </div>
             </div>
           </div>
+        </div>
+        <div class="runtime-control">
+          <button id="runtimeSettingsButton" class="runtime-settings-button" title="Model settings" aria-label="Model settings" type="button">
+            <span class="runtime-settings-button__icon" aria-hidden="true">✿</span>
+            <span class="runtime-settings-button__copy">
+              <span id="runtimeModelLabel" class="runtime-settings-button__label">Model</span>
+              <span id="runtimeEffortLabel" class="runtime-settings-button__detail">auto</span>
+            </span>
+            <span class="runtime-settings-button__chevron" aria-hidden="true">⌄</span>
+          </button>
+          <div id="runtimeSettingsMenu" class="popover runtime-settings-menu" hidden></div>
         </div>
       </div>
     </form>
@@ -1136,6 +1276,10 @@ function cacheBrief(usage: UsageData): string | undefined {
     return undefined;
   }
   return `cache ${Math.round((usage.sessionCacheHitTokens / total) * 100)}%`;
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
 function titleFromPrompt(prompt: string): string {

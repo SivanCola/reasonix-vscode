@@ -55,8 +55,16 @@ test("parseWebviewMessage accepts product UI commands", () => {
   assert.deepEqual(parseWebviewMessage({ command: "pickUiLanguage" }), {
     command: "pickUiLanguage",
   });
+  assert.deepEqual(parseWebviewMessage({ command: "pickEffort" }), {
+    command: "pickEffort",
+  });
   assert.deepEqual(parseWebviewMessage({ command: "openNativeSettings" }), {
     command: "openNativeSettings",
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "resourceSuggestions", requestId: 2, query: "src/we" }), {
+    command: "resourceSuggestions",
+    requestId: 2,
+    query: "src/we",
   });
   assert.deepEqual(parseWebviewMessage({ command: "updateSetting", key: "uiLanguage", value: "zh-CN" }), {
     command: "updateSetting",
@@ -76,6 +84,8 @@ test("parseWebviewMessage rejects malformed product UI commands", () => {
   assert.equal(parseWebviewMessage({ command: "loadSession", sessionId: "" }), undefined);
   assert.equal(parseWebviewMessage({ command: "retryMessage", index: -1 }), undefined);
   assert.equal(parseWebviewMessage({ command: "insertMessage", index: 1.5 }), undefined);
+  assert.equal(parseWebviewMessage({ command: "resourceSuggestions", requestId: -1, query: "src" }), undefined);
+  assert.equal(parseWebviewMessage({ command: "resourceSuggestions", requestId: 1, query: "x".repeat(241) }), undefined);
   assert.equal(parseWebviewMessage({ command: "updateSetting", key: "trace", value: "true" }), undefined);
   assert.equal(parseWebviewMessage({ command: "updateSetting", key: "uiLanguage", value: "fr" }), undefined);
   assert.equal(parseWebviewMessage({ command: "updateSetting", key: "unknown", value: true }), undefined);

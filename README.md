@@ -20,7 +20,7 @@ The extension does not bundle a Reasonix binary. It uses `reasonix.binaryPath` w
 - Send-time confirmation before editor context is appended to a user turn.
 - Tool-call cards with raw input, results, and backend-provided diff previews.
 - Inline approval cards for allow once, allow session, always allow, or reject.
-- Reasonix-styled chat surface with a compact command bar, orange send action, collaboration popover, and Ask/Auto/Yolo tool permission switch.
+- Reasonix-styled chat surface with a compact command bar, orange send action, collaboration popover, and Ask/Auto/Yolo tool permission menu.
 - Usage and cache-hit telemetry in the chat view and VS Code status bar.
 - Model picker with configured provider/model entries and effort selection when supported.
 - Built-in `/` prompt commands for common coding flows, plus `@workspace/path` file or directory mentions that attach bounded resource context.
@@ -46,8 +46,8 @@ Reasonix itself must already be configured with the provider credentials and mod
 3. Open `Settings` in the chat view, or run `Reasonix: Open Settings`, to configure the CLI path, model, language, context mode, auto start, and trace logging.
 4. Start a new session with `Reasonix: New Session` or the `+` button in the chat view.
 5. Type a prompt, use the collaboration popover for Plan, Goal, or Token Economy behavior, choose Ask/Auto/Yolo for tool approvals, then send with the button or `Cmd/Ctrl+Enter`.
-6. Use `/explain`, `/fix`, `/tests`, `/search`, `/mcp`, or `/skills` at the start of a prompt for focused built-in prompt commands.
-7. Reference workspace files or folders with `@src/file.ts` or `@src/` to attach bounded resource context to the user turn.
+6. Type `/` at the start of a prompt to open the slash command menu, then choose `/explain`, `/fix`, `/tests`, `/search`, `/mcp`, or `/skills`.
+7. Type `@` to open workspace file and folder suggestions; selecting `@src/file.ts` or `@src/` attaches bounded resource context to the user turn.
 8. Use `Reasonix: Send Selection` from the command palette or editor context menu to send the current editor context.
 
 When a pending tool call needs approval, Reasonix shows an inline approval card. If the chat view is unavailable, the extension falls back to a VS Code modal approval prompt.
@@ -124,6 +124,12 @@ Install dependencies and build the extension:
 ```sh
 npm install
 npm run compile
+```
+
+Open a fresh VS Code Extension Development Host with the latest local build:
+
+```sh
+npm run dev:host
 ```
 
 Useful checks:

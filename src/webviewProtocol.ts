@@ -1,3 +1,5 @@
+import type { ResourceSuggestion } from "./resourceSuggestions";
+
 export type WebviewToHostMessage =
   | {
       command: "sendPrompt";
@@ -11,6 +13,7 @@ export type WebviewToHostMessage =
   | { command: "setContextMode"; mode: "off" | "selectionOnly" | "nearby" }
   | { command: "updateSetting"; key: SettingKey; value: string | boolean }
   | { command: "pickModel" }
+  | { command: "pickEffort" }
   | { command: "pickUiLanguage" }
   | { command: "openNativeSettings" }
   | { command: "showOutput" }
@@ -23,6 +26,7 @@ export type WebviewToHostMessage =
   | { command: "continueMessage"; index: number }
   | { command: "openToolPreview"; index: number }
   | { command: "approvalDecision"; id: string; optionId: string }
+  | { command: "resourceSuggestions"; requestId: number; query: string }
   | { command: "stateSnapshot" };
 
 type SettingKey = "binaryPath" | "model" | "uiLanguage" | "autoStart" | "trace" | "includeSelectionMode";
@@ -33,6 +37,7 @@ type ToolApprovalMode = "ask" | "auto" | "yolo";
 export type HostToWebviewMessage =
   | { type: "stateSnapshot"; state: unknown }
   | { type: "notice"; text: string }
+  | { type: "resourceSuggestions"; requestId: number; query: string; items: ResourceSuggestion[] }
   | { type: "openSettings" };
 
 export function parseWebviewMessage(value: unknown): WebviewToHostMessage | undefined {
@@ -51,6 +56,7 @@ export function parseWebviewMessage(value: unknown): WebviewToHostMessage | unde
     case "cancel":
     case "newSession":
     case "pickModel":
+    case "pickEffort":
     case "pickUiLanguage":
     case "openNativeSettings":
     case "showOutput":
@@ -80,6 +86,10 @@ export function parseWebviewMessage(value: unknown): WebviewToHostMessage | unde
     case "approvalDecision":
       return typeof value.id === "string" && typeof value.optionId === "string"
         ? { command: "approvalDecision", id: value.id, optionId: value.optionId }
+        : undefined;
+    case "resourceSuggestions":
+      return isValidIndex(value.requestId) && typeof value.query === "string" && value.query.length <= 240
+        ? { command: "resourceSuggestions", requestId: value.requestId, query: value.query }
         : undefined;
     default:
       return undefined;
