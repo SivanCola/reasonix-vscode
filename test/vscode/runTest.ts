@@ -19,13 +19,12 @@ async function main(): Promise<void> {
   await runTests({
     extensionDevelopmentPath,
     extensionTestsPath,
-    launchArgs: [workspacePath, "--user-data-dir", userDataDir, "--disable-extensions"],
+    launchArgs: [workspacePath, "--user-data-dir", userDataDir, "--disable-extensions", "--disable-workspace-trust"],
     extensionTestsEnv: {
       REASONIX_FAKE_ACP: fakeAcp,
       REASONIX_FAKE_LOG: fakeLog,
       REASONIX_TEST_WORKSPACE: workspacePath,
       REASONIX_TEST_COMMANDS: "1",
-      REASONIX_FAKE_MODEL_LIST_ERROR: "1",
     },
   });
 }

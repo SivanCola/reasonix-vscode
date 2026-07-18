@@ -92,3 +92,27 @@ test("appendApproval and resolveApproval track inline approval state", () => {
   resolveApproval(items, "approval-1", true);
   assert.equal(items[0]?.type === "approval" ? items[0].status : "", "selected");
 });
+
+test("Ask permission requests render as questions and are resolved explicitly", () => {
+  const items: ChatItem[] = [];
+  appendApproval(items, {
+    sessionId: "s1",
+    toolCall: { toolCallId: "ask-a1-q1", title: "Choose", rawInput: { question: "Choose" } },
+    options: [
+      { optionId: "q1:1", name: "Focused", kind: "allow_once" },
+      { optionId: "q1:cancel", name: "Cancel", kind: "reject_once" },
+    ],
+  });
+
+  assert.deepEqual(items, [{ type: "question", id: "ask-a1-q1", title: "Choose", options: [{ optionId: "q1:1", name: "Focused" }], status: "pending" }]);
+  resolveApproval(items, "ask-a1-q1", true);
+  assert.equal(items[0]?.type === "question" ? items[0].status : "", "selected");
+});
+
+test("plan updates replace the current structured plan", () => {
+  const items: ChatItem[] = [];
+  applySessionUpdate(items, { sessionUpdate: "plan", entries: [{ content: "First", priority: "high", status: "pending" }] });
+  applySessionUpdate(items, { sessionUpdate: "plan", entries: [{ content: "Second", priority: "low", status: "completed" }] });
+
+  assert.deepEqual(items, [{ type: "plan", entries: [{ content: "Second", priority: "low", status: "completed" }] }]);
+});

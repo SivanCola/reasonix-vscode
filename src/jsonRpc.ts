@@ -8,7 +8,7 @@ type Pending = {
 };
 
 export type JsonRpcPeerHandlers = {
-  onNotification?: (method: string, params: unknown) => void;
+  onNotification?: (method: string, params: unknown) => Promise<void> | void;
   onRequest?: (method: string, params: unknown) => Promise<unknown> | unknown;
   onError?: (err: Error) => void;
 };
@@ -93,7 +93,12 @@ export class JsonRpcPeer extends EventEmitter {
       return;
     }
     if ("method" in frame && frame.method) {
-      this.handlers.onNotification?.(frame.method, frame.params);
+      const handler = this.handlers.onNotification;
+      if (handler) {
+        void Promise.resolve()
+          .then(() => handler(frame.method, frame.params))
+          .catch((err: unknown) => this.reportError(err instanceof Error ? err : new Error(String(err))));
+      }
       return;
     }
     if ("id" in frame) {

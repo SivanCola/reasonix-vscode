@@ -1,5 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
+import type { ContentBlock } from "./acpTypes";
 
 export type FileMention = {
   token: string;
@@ -11,28 +13,29 @@ export type FileMention = {
 
 const maxMentions = 5;
 const maxFileBytes = 40_000;
+const maxTotalBytes = 120_000;
 const maxDirectoryEntries = 80;
 const maxTokenLength = 240;
 
-export async function appendFileMentions(prompt: string, workspacePath: string): Promise<{ prompt: string; mentions: FileMention[] }> {
+export async function buildPromptBlocks(prompt: string, workspacePath: string): Promise<{ blocks: ContentBlock[]; mentions: FileMention[] }> {
   const mentions = await resolveFileMentions(prompt, workspacePath);
-  if (mentions.length === 0) {
-    return { prompt, mentions };
-  }
-  const blocks = mentions.map((mention) => [
-    `<${mention.kind} path="${escapeAttribute(mention.relativePath)}"${mention.truncated ? " truncated=\"true\"" : ""}>`,
-    mention.text,
-    `</${mention.kind}>`,
-  ].join("\n"));
-  return {
-    prompt: `${prompt.trimEnd()}\n\n<reasonix_file_mentions>\n${blocks.join("\n\n")}\n</reasonix_file_mentions>`,
-    mentions,
-  };
+  const resources: ContentBlock[] = mentions.map((mention) => ({
+    type: "resource",
+    resource: {
+      uri: pathToFileURL(path.resolve(workspacePath, mention.relativePath)).toString(),
+      mimeType: "text/plain",
+      text: mention.kind === "file"
+        ? `File: ${mention.relativePath}${mention.truncated ? " (truncated)" : ""}\n${mention.text}`
+        : `Directory: ${mention.relativePath}${mention.truncated ? " (truncated)" : ""}\n${mention.text}`,
+    },
+  }));
+  return { blocks: [{ type: "text", text: prompt }, ...resources], mentions };
 }
 
 export async function resolveFileMentions(prompt: string, workspacePath: string): Promise<FileMention[]> {
   const seen = new Set<string>();
   const mentions: FileMention[] = [];
+  let remainingBytes = maxTotalBytes;
   for (const token of extractMentionTokens(prompt)) {
     if (mentions.length >= maxMentions) {
       break;
@@ -47,31 +50,49 @@ export async function resolveFileMentions(prompt: string, workspacePath: string)
       continue;
     }
     try {
-      const stat = await fs.stat(absolutePath);
+      const realPath = await fs.realpath(absolutePath);
+      if (!isInsideWorkspace(realPath, await fs.realpath(workspacePath))) {
+        continue;
+      }
+      const stat = await fs.stat(realPath);
       if (stat.isFile()) {
-        const buffer = await fs.readFile(absolutePath);
-        const truncated = buffer.byteLength > maxFileBytes;
+        const buffer = await fs.readFile(realPath);
+        const allowed = Math.max(0, Math.min(maxFileBytes, remainingBytes));
+        if (allowed === 0) {
+          break;
+        }
+        const truncated = buffer.byteLength > allowed;
+        const visible = buffer.subarray(0, allowed);
         mentions.push({
           token,
           kind: "file",
           relativePath,
-          text: buffer.subarray(0, maxFileBytes).toString("utf8"),
+          text: visible.toString("utf8"),
           truncated,
         });
+        remainingBytes -= visible.byteLength;
       } else if (stat.isDirectory()) {
-        const entries = await fs.readdir(absolutePath, { withFileTypes: true });
+        const entries = await fs.readdir(realPath, { withFileTypes: true });
         const sorted = entries
           .filter((entry) => entry.name !== ".DS_Store")
           .sort((a, b) => a.name.localeCompare(b.name));
         const visible = sorted.slice(0, maxDirectoryEntries);
         const truncated = sorted.length > visible.length;
+        const text = visible.map((entry) => directoryEntryLine(entry)).join("\n");
+        const buffer = Buffer.from(text, "utf8");
+        const allowed = Math.max(0, remainingBytes);
+        if (allowed === 0) {
+          break;
+        }
+        const visibleBuffer = buffer.subarray(0, allowed);
         mentions.push({
           token,
           kind: "directory",
           relativePath,
-          text: visible.map((entry) => directoryEntryLine(entry)).join("\n"),
-          truncated,
+          text: visibleBuffer.toString("utf8"),
+          truncated: truncated || buffer.byteLength > allowed,
         });
+        remainingBytes -= visibleBuffer.byteLength;
       }
     } catch {
       // Ignore unresolved @ tokens so ordinary mentions do not block sending.
@@ -94,7 +115,12 @@ function extractMentionTokens(prompt: string): string[] {
 }
 
 function normalizeMentionPath(token: string): string | undefined {
-  const decoded = decodeURIComponent(token);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(token);
+  } catch {
+    return undefined;
+  }
   if (decoded.includes("\0") || path.isAbsolute(decoded)) {
     return undefined;
   }
@@ -120,10 +146,6 @@ function isInsideWorkspace(absolutePath: string, workspacePath: string): boolean
 
 function stripTrailingPunctuation(value: string): string {
   return value.replace(/[.,!?]+$/g, "");
-}
-
-function escapeAttribute(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 
 function directoryEntryLine(entry: import("node:fs").Dirent): string {

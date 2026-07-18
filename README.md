@@ -6,7 +6,7 @@
   <a href="./README.zh-CN.md">简体中文</a>
 </p>
 
-Reasonix for VS Code brings the local Reasonix coding agent into the editor. It runs the existing `reasonix acp` backend and keeps the VS Code extension focused on IDE integration: chat, workspace sessions, editor context, tool-call review, approvals, cancellation, model selection, and usage telemetry.
+Reasonix for VS Code brings the local Reasonix coding agent into the editor. It implements the ACP v1 client surface used by Reasonix 1.0 (`main-v2`) and keeps the extension focused on IDE integration: chat, native sessions, editor resources, tool review, approvals and questions, terminals, models, modes, and plans.
 
 This repository is the standalone VS Code extension package. It does not include the Reasonix CLI or upstream Reasonix source code.
 
@@ -15,16 +15,16 @@ The extension does not bundle a Reasonix binary. It uses `reasonix.binaryPath` w
 ## Highlights
 
 - Chat view in the VS Code Activity Bar, backed by the local `reasonix acp` process.
-- Workspace-scoped Reasonix clients and sessions for multi-root workspaces.
-- Current file, selection, and nearby cursor context insertion.
+- Native `session/list`, `load`, `resume`, `close`, and `delete` lifecycle with automatic reconnect/resume.
+- ACP filesystem overlay reads unsaved buffers and applies guarded workspace edits; client-owned terminals stream commands in VS Code.
+- Current file, selection, nearby cursor context, and `@` mentions sent as ACP resource blocks on the current user turn.
 - Send-time confirmation before editor context is appended to a user turn.
 - Tool-call cards with raw input, results, and backend-provided diff previews.
-- Inline approval cards for allow once, allow session, always allow, or reject.
-- Reasonix-styled chat surface with a compact command bar, orange send action, collaboration popover, and Ask/Auto/Yolo tool permission menu.
-- Usage and cache-hit telemetry in the chat view and VS Code status bar.
-- Model picker with configured provider/model entries and effort selection when supported.
-- Built-in `/` prompt commands for common coding flows, plus `@workspace/path` file or directory mentions that attach bounded resource context.
-- MCP status from the ACP backend in the top metadata and settings view; tool calls, skills, and MCP activity stream through Reasonix tool cards.
+- Separate inline approval and structured question controls; Ask questions are never auto-answered.
+- Reasonix-styled chat surface with independent Execution Method, Work Mode, and Ask/Auto/Yolo tool permission menus backed by ACP session axes.
+- Model, reasoning effort, execution method, work mode, and tool approval controls backed by the corresponding ACP session config and mode methods.
+- Dynamic slash commands, structured plans, and clickable tool locations from `session/update` notifications.
+- Usage and cache telemetry are shown only when the backend actually reports them.
 - Path redaction for workspace and home-directory paths in the Reasonix OutputChannel.
 
 ## Requirements
@@ -33,11 +33,12 @@ Install and configure Reasonix first:
 
 ```sh
 npm i -g reasonix
+# or: brew install esengine/reasonix/reasonix
 ```
 
 If `reasonix` is not available on `PATH`, set `reasonix.binaryPath` to the absolute CLI path.
 
-Reasonix itself must already be configured with the provider credentials and models you want to use. The extension delegates model execution, tools, permissions, MCP, and transcripts to the local Reasonix backend.
+Use Reasonix 1.0 or newer. Reasonix itself must already be configured with the provider credentials and models you want to use. The extension delegates model execution, tools, permissions, MCP, and transcripts to the local Reasonix backend.
 
 ## Getting Started
 
@@ -45,8 +46,8 @@ Reasonix itself must already be configured with the provider credentials and mod
 2. Open the Reasonix Activity Bar view, or run `Reasonix: Open Chat`.
 3. Open `Settings` in the chat view, or run `Reasonix: Open Settings`, to configure the CLI path, model, language, context mode, auto start, and trace logging.
 4. Start a new session with `Reasonix: New Session` or the `+` button in the chat view.
-5. Type a prompt, use the collaboration popover for Plan, Goal, or Token Economy behavior, choose Ask/Auto/Yolo for tool approvals, then send with the button or `Cmd/Ctrl+Enter`.
-6. Type `/` at the start of a prompt to open the slash command menu, then choose `/explain`, `/fix`, `/tests`, `/search`, `/mcp`, or `/skills`.
+5. Type a prompt, choose an execution method (Standard, Plan, or Goal), a work mode (Lightweight, Balanced, or Delivery), and an Ask/Auto/Yolo tool approval policy, then send with the button or `Cmd/Ctrl+Enter`.
+6. Type `/` at the start of a prompt to open the command menu advertised by the active Reasonix session.
 7. Type `@` to open workspace file and folder suggestions; selecting `@src/file.ts` or `@src/` attaches bounded resource context to the user turn.
 8. Use `Reasonix: Send Selection` from the command palette or editor context menu to send the current editor context.
 
@@ -61,7 +62,9 @@ When a pending tool call needs approval, Reasonix shows an inline approval card.
 | `Reasonix: Send Selection` | Sends the current file path, language id, selection or nearby cursor window as user-turn context. |
 | `Reasonix: Cancel Turn` | Sends `session/cancel` to the active Reasonix session. |
 | `Reasonix: Pick Model` | Opens a model picker backed by the Reasonix ACP model list. |
+| `Reasonix: Pick Effort` | Selects a reasoning level from the session's ACP config options. |
 | `Reasonix: Pick UI Language` | Switches the chat UI between Auto, English, and Simplified Chinese. |
+| `Reasonix: Select CLI Binary` | Selects an installed Reasonix executable. |
 | `Reasonix: Open Settings` | Opens the Reasonix settings view inside the Activity Bar chat view. |
 | `Reasonix: Show Output` | Opens the Reasonix OutputChannel. |
 
@@ -81,7 +84,9 @@ When a pending tool call needs approval, Reasonix shows an inline approval card.
 Reasonix for VS Code follows a narrow host boundary:
 
 - The Webview cannot access the shell, file system, or network directly.
-- Editor context is appended to user turns only, not to system prompts, tool schemas, or stable prefixes.
+- Editor context and mentions are ACP resource blocks on user turns only, never system prompts, tool schemas, or stable prefixes.
+- Filesystem callbacks require a trusted workspace, stay inside the workspace after symlink resolution, and refuse stale concurrent edits.
+- Terminal callbacks require a trusted workspace, keep the working directory inside it, stream through a VS Code terminal, and bound captured output.
 - Normal chat sends ask for confirmation before adding active editor context.
 - `Reasonix: Send Selection` is an explicit command for sending the active selection or nearby cursor window.
 - OutputChannel logs redact the active workspace path and home directory before display.
@@ -109,9 +114,9 @@ Install Reasonix with `npm i -g reasonix`, make sure it is on `PATH`, or set `re
 
 Open `Reasonix: Show Output` and check the ACP process logs. Restart with `Reasonix: New Session`.
 
-### Model list or effort selection is unavailable
+### Model or effort selection is unavailable
 
-Older ACP backends may not expose the optional `model/list` or `effort/set` extension methods. The chat flow still works with the configured default model.
+The active session did not advertise the relevant model or `thought_level` config option. Chat continues with the configured default.
 
 ### Diff preview did not open
 
@@ -148,9 +153,9 @@ Package a VSIX:
 npm run package
 ```
 
-`npm run test:vscode` uses `@vscode/test-electron` with a fake ACP server to verify extension activation, chat command flow, session startup, editor-context sending, webview `sendPrompt` handling, slash command expansion, `@workspace/path` file and directory mentions, MCP/skill tool updates, auto approvals, and optional model-list fallback without requiring a real model call.
+`npm run test:vscode` uses `@vscode/test-electron` with a main-v2-shaped fake ACP server. It verifies independent execution/work/approval axes, cache-stable native profile switching, early command updates, native sessions, resource blocks, unsaved-buffer reads, guarded writes, VS Code terminals, plans, tool locations, Ask handling, cancellation, and reconnect/resume without a model call.
 
-`npm run smoke:acp` starts the real `reasonix acp` backend and checks `initialize`, `session/new`, and optional `session/status` / `model/list` compatibility without sending a prompt or invoking a model. Set `REASONIX_BINARY=/absolute/path/to/reasonix` to test a specific CLI. Set `REASONIX_ACP_SMOKE_REQUIRED=1` if missing `reasonix` should fail instead of skip.
+`npm run smoke:acp` starts the real `reasonix acp` backend and checks capabilities, session state, list, mode switching, close, and cleanup without sending a prompt or invoking a model. Set `REASONIX_BINARY=/absolute/path/to/reasonix` to test a specific CLI. Set `REASONIX_ACP_SMOKE_REQUIRED=1` if missing `reasonix` should fail instead of skip.
 
 ## Release Checklist
 

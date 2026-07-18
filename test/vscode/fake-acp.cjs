@@ -6,13 +6,18 @@ let buffer = "";
 let sessionId = "fake-session";
 let nextRequestId = 1000;
 let pendingSlowPromptId;
-const pendingPermissions = new Map();
+let currentModeId = "normal";
+let currentModelId = "fake/default";
+let currentEffort = "medium";
+let currentWorkMode = "balanced";
+let currentApprovalMode = "ask";
+const pendingAgentRequests = new Map();
+const sessions = new Map();
 
 function log(event) {
-  if (!logPath) {
-    return;
+  if (logPath) {
+    fs.appendFileSync(logPath, JSON.stringify(event) + "\n");
   }
-  fs.appendFileSync(logPath, JSON.stringify(event) + "\n");
 }
 
 log({ method: "process/start", argv: process.argv.slice(2), cwd: process.cwd() });
@@ -33,69 +38,171 @@ function error(id, code, message) {
   write({ id, error: { code, message } });
 }
 
-function handle(message) {
-  if (!message.method && pendingPermissions.has(message.id)) {
-    const pending = pendingPermissions.get(message.id);
-    pendingPermissions.delete(message.id);
-    log({ method: "permission/response", response: message, toolCallId: pending.toolCallId });
-    notify("session/update", {
-      sessionId,
-      update: {
-        sessionUpdate: "tool_call_update",
-        toolCallId: pending.toolCallId,
-        status: "completed",
-        content: [{ type: "text", content: { type: "text", text: "permission accepted" } }],
+function request(method, params, pending) {
+  const id = "agent-" + nextRequestId++;
+  pendingAgentRequests.set(id, pending);
+  log({ method, params });
+  write({ id, method, params });
+}
+
+function sessionState() {
+  return {
+    models: {
+      currentModelId,
+      availableModels: [
+        { modelId: "fake/default", name: "Fake Default", description: "Default test model" },
+        { modelId: "fake/fast", name: "Fake Fast", description: "Fast test model" },
+      ],
+    },
+    modes: {
+      currentModeId,
+      availableModes: [
+        { id: "normal", name: "Normal" },
+        { id: "plan", name: "Plan" },
+        { id: "goal", name: "Goal" },
+      ],
+    },
+    configOptions: [
+      {
+        id: "model",
+        name: "Model",
+        category: "model",
+        type: "select",
+        currentValue: currentModelId,
+        options: [
+          { value: "fake/default", name: "Fake Default" },
+          { value: "fake/fast", name: "Fake Fast" },
+        ],
       },
-    });
-    result(pending.promptRequestId, { stopReason: "end_turn" });
+      {
+        id: "effort",
+        name: "Reasoning effort",
+        category: "thought_level",
+        type: "select",
+        currentValue: currentEffort,
+        options: [
+          { value: "auto", name: "Auto" },
+          { value: "low", name: "Low" },
+          { value: "medium", name: "Medium" },
+          { value: "high", name: "High" },
+        ],
+      },
+      {
+        id: "work_mode",
+        name: "Work mode",
+        category: "work_mode",
+        type: "select",
+        currentValue: currentWorkMode,
+        options: [
+          { value: "economy", name: "Economy" },
+          { value: "balanced", name: "Balanced" },
+          { value: "delivery", name: "Delivery" },
+        ],
+      },
+      {
+        id: "tool_approval",
+        name: "Tool approvals",
+        category: "tool_approval",
+        type: "select",
+        currentValue: currentApprovalMode,
+        options: [
+          { value: "ask", name: "Ask" },
+          { value: "auto", name: "Auto" },
+          { value: "yolo", name: "Yolo" },
+        ],
+      },
+    ],
+  };
+}
+
+function availableCommands() {
+  return {
+    sessionId,
+    update: {
+      sessionUpdate: "available_commands_update",
+      availableCommands: [
+        { name: "review", description: "Review the current changes", input: { hint: "scope" } },
+        { name: "test", description: "Run relevant tests" },
+      ],
+    },
+  };
+}
+
+function handle(message) {
+  if (!message.method && pendingAgentRequests.has(message.id)) {
+    handleAgentResponse(message, pendingAgentRequests.get(message.id));
+    pendingAgentRequests.delete(message.id);
     return;
   }
   log({ method: message.method, params: message.params });
   switch (message.method) {
     case "initialize":
-      result(message.id, { protocolVersion: 1, agentInfo: { name: "fake-reasonix" } });
+      result(message.id, {
+        protocolVersion: 1,
+        agentInfo: { name: "fake-reasonix", version: "main-v2" },
+        agentCapabilities: {
+          loadSession: true,
+          sessionCapabilities: { list: {}, resume: {}, close: {}, delete: {} },
+          promptCapabilities: { image: false, audio: false, embeddedContext: true },
+          mcpCapabilities: { http: true, sse: false },
+        },
+        authMethods: [],
+      });
       return;
     case "session/new":
       sessionId = "fake-session-" + process.pid;
-      result(message.id, { sessionId });
+      sessions.set(sessionId, { sessionId, cwd: message.params?.cwd || process.cwd(), title: "Fake session", updatedAt: new Date().toISOString() });
+      notify("session/update", availableCommands());
+      result(message.id, { sessionId, ...sessionState() });
       return;
     case "session/load":
       sessionId = message.params?.sessionId || sessionId;
-      result(message.id, { sessionId });
+      notify("session/update", { sessionId, update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: "restored prompt" } } });
+      notify("session/update", { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "restored response" } } });
+      notify("session/update", availableCommands());
+      result(message.id, sessionState());
       return;
-    case "session/status":
-      const status = {
-        label: "fake",
-        running: false,
-        used: 125,
-        window: 200000,
-        cacheHit: 90,
-        cacheMiss: 10,
-        lastUsage: usage(),
-        connectedMcp: ["fake-mcp"],
-        configuredMcp: ["fake-mcp"],
-        disconnectedMcp: [],
-      };
-      log({ method: "session/status/result", result: status });
-      result(message.id, status);
+    case "session/resume":
+      sessionId = message.params?.sessionId || sessionId;
+      notify("session/update", availableCommands());
+      result(message.id, sessionState());
       return;
-    case "model/list":
-      if (process.env.REASONIX_FAKE_MODEL_LIST_ERROR === "1") {
-        log({ method: "model/list/error" });
-        error(message.id, -32601, "unknown method model/list");
-        return;
+    case "session/list":
+      result(message.id, { sessions: [...sessions.values()] });
+      return;
+    case "session/close":
+      result(message.id, {});
+      return;
+    case "session/delete":
+      sessions.delete(message.params?.sessionId);
+      result(message.id, {});
+      return;
+    case "session/set_mode":
+      currentModeId = message.params?.modeId || "normal";
+      notify("session/update", { sessionId, update: { sessionUpdate: "current_mode_update", currentModeId } });
+      result(message.id, {});
+      return;
+    case "session/set_config_option": {
+      switch (message.params?.configId) {
+        case "model":
+          currentModelId = message.params?.value;
+          break;
+        case "effort":
+          currentEffort = message.params?.value;
+          break;
+        case "work_mode":
+          currentWorkMode = message.params?.value;
+          break;
+        case "tool_approval":
+          currentApprovalMode = message.params?.value;
+          break;
       }
-      result(message.id, {
-        defaultModel: "fake/default",
-        currentModel: "fake/default",
-        models: [{ ref: "fake/default", provider: "fake", model: "default", current: true, configured: true, effortSupported: true, effortLevels: ["low", "medium", "high"], defaultEffort: "medium" }],
-      });
+      const state = sessionState();
+      notify("session/update", { sessionId, update: { sessionUpdate: "config_option_update", configOptions: state.configOptions } });
+      result(message.id, { configOptions: state.configOptions });
       return;
-    case "effort/set":
-      result(message.id, { modelRef: message.params?.modelRef || "fake/default", level: message.params?.level || "medium" });
-      return;
+    }
     case "session/cancel":
-      log({ method: "session/cancel", params: message.params });
       if (pendingSlowPromptId !== undefined) {
         log({ method: "session/prompt/cancelled" });
         result(pendingSlowPromptId, { stopReason: "cancelled" });
@@ -118,101 +225,104 @@ function handlePrompt(message) {
     notify("session/update", { sessionId, update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "working" } } });
     return;
   }
-  if (text.includes("mcp_tool")) {
-    log({ method: "tool/fake-mcp" });
-    notify("session/update", {
-      sessionId,
-      update: {
-        sessionUpdate: "tool_call",
-        toolCallId: "fake-mcp-tool",
-        title: "fake-mcp.search",
-        kind: "search",
-        status: "pending",
-        rawInput: { server: "fake-mcp", tool: "search", query: "reasonix" },
-      },
-    });
-    notify("session/update", {
-      sessionId,
-      update: {
-        sessionUpdate: "tool_call_update",
-        toolCallId: "fake-mcp-tool",
-        status: "completed",
-        content: [{ type: "text", content: { type: "text", text: "fake MCP search result" } }],
-      },
-    });
-  }
-  if (text.includes("skill_use")) {
-    log({ method: "tool/fake-skill" });
-    notify("session/update", {
-      sessionId,
-      update: {
-        sessionUpdate: "tool_call",
-        toolCallId: "fake-skill-tool",
-        title: "skill: fake-skill",
-        kind: "other",
-        status: "completed",
-        rawInput: { skill: "fake-skill", action: "load" },
-      },
-    });
+  if (text.includes("disconnect_probe")) {
+    log({ method: "process/disconnect-probe" });
+    process.exit(23);
   }
   if (text.includes("permission_probe")) {
-    const requestId = "permission-" + nextRequestId++;
     const toolCallId = "fake-permission-tool";
-    pendingPermissions.set(requestId, { promptRequestId: message.id, toolCallId });
-    notify("session/update", {
+    notify("session/update", { sessionId, update: { sessionUpdate: "tool_call", toolCallId, title: "write_file", kind: "edit", status: "pending", rawInput: { path: "sample.ts" }, locations: [{ path: message.params?.cwd || "sample.ts", line: 1 }] } });
+    if (currentApprovalMode !== "ask") {
+      log({ method: "permission/server-auto", mode: currentApprovalMode });
+      notify("session/update", { sessionId, update: { sessionUpdate: "tool_call_update", toolCallId, status: "completed", content: [{ type: "content", content: { type: "text", text: "permission handled by Reasonix" } }] } });
+      result(message.id, { stopReason: "end_turn" });
+      return;
+    }
+    request("session/request_permission", {
       sessionId,
-      update: {
-        sessionUpdate: "tool_call",
-        toolCallId,
-        title: "fake-mcp.write",
-        kind: "edit",
-        status: "pending",
-        rawInput: { server: "fake-mcp", tool: "write", path: "sample.ts" },
-      },
-    });
-    write({
-      id: requestId,
-      method: "session/request_permission",
-      params: {
-        sessionId,
-        toolCall: {
-          toolCallId,
-          title: "fake-mcp.write",
-          kind: "edit",
-          rawInput: { server: "fake-mcp", tool: "write", path: "sample.ts" },
-        },
-        options: [
-          { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
-          { optionId: "reject", name: "Reject", kind: "reject_once" },
-        ],
-      },
-    });
+      toolCall: { toolCallId, title: "write_file", kind: "edit", rawInput: { path: "sample.ts" } },
+      options: [
+        { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+        { optionId: "allow_always", name: "Allow for session", kind: "allow_always" },
+        { optionId: "reject_once", name: "Reject", kind: "reject_once" },
+      ],
+    }, { type: "permission", promptRequestId: message.id, toolCallId });
     return;
   }
+  if (text.includes("ask_probe")) {
+    request("session/request_permission", {
+      sessionId,
+      toolCall: {
+        toolCallId: "ask-fake-question-choice",
+        title: "Choose a strategy",
+        kind: "other",
+        rawInput: { id: "choice", question: "Choose a strategy", options: [{ label: "Focused" }, { label: "Broad" }], multi: false },
+      },
+      options: [
+        { optionId: "choice:1", name: "Focused", kind: "allow_once" },
+        { optionId: "choice:2", name: "Broad", kind: "allow_once" },
+        { optionId: "choice:cancel", name: "Cancel", kind: "reject_once" },
+      ],
+    }, { type: "ask", promptRequestId: message.id });
+    return;
+  }
+  if (text.includes("fs_read_probe")) {
+    request("fs/read_text_file", { sessionId, path: "sample.ts" }, { type: "fs-read", promptRequestId: message.id });
+    return;
+  }
+  if (text.includes("fs_write_probe")) {
+    request("fs/write_text_file", { sessionId, path: "bridge-output.txt", content: "written through VS Code" }, { type: "fs-write", promptRequestId: message.id });
+    return;
+  }
+  if (text.includes("terminal_probe")) {
+    request("terminal/create", { sessionId, command: "printf reasonix-terminal", outputByteLimit: 8192 }, { type: "terminal-create", promptRequestId: message.id });
+    return;
+  }
+  if (text.includes("plan_probe")) {
+    notify("session/update", { sessionId, update: { sessionUpdate: "plan", entries: [
+      { content: "Inspect protocol", priority: "high", status: "completed" },
+      { content: "Verify integration", priority: "medium", status: "in_progress" },
+    ] } });
+    notify("session/update", { sessionId, update: { sessionUpdate: "tool_call", toolCallId: "location-tool", title: "read_file", kind: "read", status: "completed", locations: [{ path: "sample.ts", line: 1 }] } });
+  }
   notify("session/update", { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "fake response" } } });
-  notify("session/update", { sessionId, update: { sessionUpdate: "usage", usage: usage() } });
   result(message.id, { stopReason: "end_turn" });
 }
 
-function promptText(params) {
-  const prompt = params?.prompt;
-  if (!Array.isArray(prompt)) {
-    return "";
+function handleAgentResponse(message, pending) {
+  log({ method: `${pending.type}/response`, response: message });
+  switch (pending.type) {
+    case "permission":
+      notify("session/update", { sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: pending.toolCallId, status: "completed", content: [{ type: "content", content: { type: "text", text: "permission accepted" } }] } });
+      result(pending.promptRequestId, { stopReason: "end_turn" });
+      return;
+    case "ask":
+    case "fs-read":
+    case "fs-write":
+      result(pending.promptRequestId, { stopReason: "end_turn" });
+      return;
+    case "terminal-create": {
+      const terminalId = message.result?.terminalId;
+      request("terminal/wait_for_exit", { sessionId, terminalId }, { type: "terminal-wait", promptRequestId: pending.promptRequestId, terminalId });
+      return;
+    }
+    case "terminal-wait":
+      request("terminal/output", { sessionId, terminalId: pending.terminalId }, { type: "terminal-output", promptRequestId: pending.promptRequestId, terminalId: pending.terminalId });
+      return;
+    case "terminal-output":
+      log({ method: "terminal/captured", output: message.result });
+      request("terminal/release", { sessionId, terminalId: pending.terminalId }, { type: "terminal-release", promptRequestId: pending.promptRequestId });
+      return;
+    case "terminal-release":
+      result(pending.promptRequestId, { stopReason: "end_turn" });
+      return;
   }
-  return prompt.map((part) => part?.text || part?.resource?.text || "").join("\n");
 }
 
-function usage() {
-  return {
-    promptTokens: 100,
-    completionTokens: 25,
-    totalTokens: 125,
-    cacheHitTokens: 90,
-    cacheMissTokens: 10,
-    reasoningTokens: 0,
-    sessionCacheHitTokens: 90,
-    sessionCacheMissTokens: 10,
-  };
+function promptText(params) {
+  return Array.isArray(params?.prompt)
+    ? params.prompt.map((part) => part?.text || part?.resource?.text || "").join("\n")
+    : "";
 }
 
 process.stdin.setEncoding("utf8");

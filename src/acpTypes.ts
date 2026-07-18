@@ -18,31 +18,131 @@ export interface JsonRpcResponse {
   error?: { code: number; message: string; data?: unknown };
 }
 
-export interface ContentBlock {
-  type: "text" | "resource";
-  text?: string;
-  resource?: {
-    uri: string;
-    mimeType?: string;
-    text?: string;
+export type ContentBlock =
+  | { type: "text"; text: string }
+  | {
+      type: "resource";
+      resource: {
+        uri: string;
+        mimeType?: string;
+        text?: string;
+      };
+    };
+
+export interface Implementation {
+  name: string;
+  title?: string;
+  version?: string;
+}
+
+export interface ClientCapabilities {
+  fs?: { readTextFile?: boolean; writeTextFile?: boolean };
+  terminal?: boolean;
+}
+
+export interface AgentCapabilities {
+  loadSession?: boolean;
+  sessionCapabilities?: {
+    list?: Record<string, never>;
+    resume?: Record<string, never>;
+    close?: Record<string, never>;
+    delete?: Record<string, never>;
   };
+  promptCapabilities?: {
+    image?: boolean;
+    audio?: boolean;
+    embeddedContext?: boolean;
+  };
+  mcpCapabilities?: { http?: boolean; sse?: boolean };
+}
+
+export interface AuthMethod {
+  id: string;
+  name: string;
+  description?: string;
+  type?: string;
+  args?: string[];
+  env?: Record<string, string>;
 }
 
 export interface InitializeResult {
   protocolVersion: number;
-  agentInfo: {
-    name: string;
-    version?: string;
-  };
+  agentInfo: Implementation;
+  agentCapabilities?: AgentCapabilities;
+  authMethods?: AuthMethod[];
 }
 
-export interface SessionNewResult {
+export interface SessionModelInfo {
+  modelId: string;
+  name: string;
+  description?: string;
+}
+
+export interface SessionModelState {
+  availableModels: SessionModelInfo[];
+  currentModelId: string;
+}
+
+export interface SessionMode {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface SessionModeState {
+  currentModeId: string;
+  availableModes: SessionMode[];
+}
+
+export interface SessionConfigSelectOption {
+  value: string;
+  name: string;
+  description?: string;
+}
+
+export interface SessionConfigOption {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  type: string;
+  currentValue: string;
+  options: SessionConfigSelectOption[];
+}
+
+export interface SessionStateResult {
+  models?: SessionModelState;
+  modes?: SessionModeState;
+  configOptions?: SessionConfigOption[];
+}
+
+export interface SessionNewResult extends SessionStateResult {
   sessionId: string;
+}
+
+export type SessionLoadResult = SessionStateResult;
+export type SessionResumeResult = SessionStateResult;
+
+export interface SetSessionConfigOptionResult {
+  configOptions: SessionConfigOption[];
 }
 
 export interface SessionPromptResult {
   stopReason: "end_turn" | "cancelled" | "error";
   transcriptPath?: string;
+}
+
+export interface SessionInfo {
+  sessionId: string;
+  cwd: string;
+  title?: string;
+  updatedAt?: string;
+  _meta?: Record<string, unknown>;
+}
+
+export interface SessionListResult {
+  sessions: SessionInfo[];
+  nextCursor?: string;
 }
 
 export interface SessionUpdateParams {
@@ -54,6 +154,10 @@ export type SessionUpdate =
   | MessageChunkUpdate
   | ToolCallUpdate
   | ToolCallResultUpdate
+  | AvailableCommandsUpdate
+  | ConfigOptionUpdate
+  | PlanUpdate
+  | CurrentModeUpdate
   | UsageUpdate;
 
 export interface MessageChunkUpdate {
@@ -67,6 +171,11 @@ export interface MessageChunkUpdate {
   };
 }
 
+export interface ToolCallLocation {
+  path: string;
+  line?: number;
+}
+
 export interface ToolCallUpdate {
   sessionUpdate: "tool_call";
   toolCallId: string;
@@ -75,6 +184,7 @@ export interface ToolCallUpdate {
   status?: "pending" | "completed" | "failed" | string;
   rawInput?: unknown;
   preview?: ChangePreview;
+  locations?: ToolCallLocation[];
 }
 
 export interface ToolCallResultUpdate {
@@ -85,6 +195,38 @@ export interface ToolCallResultUpdate {
     type: string;
     content: ContentBlock;
   }>;
+}
+
+export interface AvailableCommand {
+  name: string;
+  description: string;
+  input?: { hint: string };
+}
+
+export interface AvailableCommandsUpdate {
+  sessionUpdate: "available_commands_update";
+  availableCommands: AvailableCommand[];
+}
+
+export interface ConfigOptionUpdate {
+  sessionUpdate: "config_option_update";
+  configOptions: SessionConfigOption[];
+}
+
+export interface PlanEntry {
+  content: string;
+  priority: string;
+  status: string;
+}
+
+export interface PlanUpdate {
+  sessionUpdate: "plan";
+  entries: PlanEntry[];
+}
+
+export interface CurrentModeUpdate {
+  sessionUpdate: "current_mode_update";
+  currentModeId: string;
 }
 
 export interface UsageUpdate {
@@ -134,20 +276,92 @@ export interface PermissionRequestParams {
     title?: string;
     kind?: string;
     status?: string;
+    content?: Array<{ type: string; content: ContentBlock }>;
     rawInput?: unknown;
     preview?: ChangePreview;
   };
   options: Array<{
     optionId: string;
     name: string;
-    kind:
-      | "allow_once"
-      | "allow_always"
-      | "allow_persistent"
-      | "reject_once"
-      | "reject_always"
-      | string;
+    kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" | string;
   }>;
+}
+
+export interface PermissionRequestResult {
+  outcome:
+    | { outcome: "selected"; optionId: string }
+    | { outcome: "cancelled" };
+}
+
+export interface FSReadTextFileParams {
+  sessionId: string;
+  path: string;
+  line?: number;
+  limit?: number;
+}
+
+export interface FSReadTextFileResult {
+  content: string;
+}
+
+export interface FSWriteTextFileParams {
+  sessionId: string;
+  path: string;
+  content: string;
+}
+
+export interface TerminalCreateParams {
+  sessionId: string;
+  command: string;
+  args?: string[];
+  cwd?: string;
+  outputByteLimit?: number;
+}
+
+export interface TerminalCreateResult {
+  terminalId: string;
+}
+
+export interface TerminalIDParams {
+  sessionId: string;
+  terminalId: string;
+}
+
+export interface TerminalExitStatus {
+  exitCode?: number;
+  signal?: string;
+}
+
+export interface TerminalOutputResult {
+  output: string;
+  truncated: boolean;
+  exitStatus?: TerminalExitStatus;
+}
+
+export type TerminalWaitResult = TerminalExitStatus;
+
+// Legacy private-protocol types are kept only for compatibility fallbacks.
+export interface ModelInfo {
+  ref: string;
+  provider: string;
+  model: string;
+  current?: boolean;
+  configured: boolean;
+  effort?: string;
+  effortSupported: boolean;
+  effortLevels?: string[];
+  defaultEffort?: string;
+}
+
+export interface ModelListResult {
+  defaultModel?: string;
+  currentModel?: string;
+  models: ModelInfo[];
+}
+
+export interface EffortSetResult {
+  modelRef: string;
+  level: string;
 }
 
 export interface SessionStatusResult {
@@ -161,29 +375,6 @@ export interface SessionStatusResult {
   connectedMcp?: string[];
   configuredMcp?: string[];
   disconnectedMcp?: string[];
-}
-
-export interface ModelListResult {
-  defaultModel?: string;
-  currentModel?: string;
-  models: ModelInfo[];
-}
-
-export interface ModelInfo {
-  ref: string;
-  provider: string;
-  model: string;
-  current?: boolean;
-  configured: boolean;
-  effort?: string;
-  effortSupported: boolean;
-  effortLevels?: string[];
-  defaultEffort?: string;
-}
-
-export interface EffortSetResult {
-  modelRef: string;
-  level: string;
 }
 
 export interface SlashCommandInfo {
@@ -231,15 +422,4 @@ export interface SlashCompletionInfo {
   insert: string;
   hint?: string;
   descend?: boolean;
-}
-
-export interface PermissionRequestResult {
-  outcome:
-    | {
-        outcome: "selected";
-        optionId: string;
-      }
-    | {
-        outcome: "cancelled";
-      };
 }
