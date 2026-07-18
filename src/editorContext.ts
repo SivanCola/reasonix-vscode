@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
+import type { ContentBlock } from "./acpTypes";
 
 export type IncludeSelectionMode = "off" | "selectionOnly" | "nearby";
 
@@ -10,57 +11,40 @@ export function configuredSelectionMode(): IncludeSelectionMode {
   return value === "off" || value === "nearby" || value === "selectionOnly" ? value : "selectionOnly";
 }
 
-export function buildEditorContext(mode = configuredSelectionMode()): string | undefined {
-  return buildEditorContextInfo(mode)?.text;
-}
-
-export function buildEditorContextInfo(mode = configuredSelectionMode()): { text: string; summary: string } | undefined {
+export function buildEditorContextBlock(mode = configuredSelectionMode()): { block: ContentBlock; summary: string } | undefined {
   if (mode === "off") {
     return undefined;
   }
   const editor = vscode.window.activeTextEditor;
-  if (!editor) {
+  if (!editor || editor.document.isUntitled) {
     return undefined;
   }
-  const doc = editor.document;
-  if (doc.isUntitled) {
-    return undefined;
-  }
-
-  const workspaceFolder = vscode.workspace.getWorkspaceFolder(doc.uri);
-  const filePath = workspaceFolder ? path.relative(workspaceFolder.uri.fsPath, doc.uri.fsPath) : doc.uri.fsPath;
+  const document = editor.document;
   const selection = editor.selection;
   const hasSelection = !selection.isEmpty;
   if (mode === "selectionOnly" && !hasSelection) {
     return undefined;
   }
-  const range = hasSelection ? selection : cursorWindow(doc, selection.active.line);
-  const selectedText = doc.getText(range);
-  if (selectedText.trim() === "") {
+  const range = hasSelection ? selection : cursorWindow(document, selection.active.line);
+  const text = document.getText(range);
+  if (text.trim() === "") {
     return undefined;
   }
-
-  const label = hasSelection ? "Selection" : "Cursor window";
+  const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+  const filePath = folder ? path.relative(folder.uri.fsPath, document.uri.fsPath).replace(/\\/g, "/") : document.uri.fsPath;
   const summary = `${filePath} lines ${range.start.line + 1}-${range.end.line + 1}`;
-  const contextText = [
-    "<vscode_context>",
-    `File: ${filePath}`,
-    `Language: ${doc.languageId}`,
-    `${label}: lines ${range.start.line + 1}-${range.end.line + 1}`,
-    "```" + doc.languageId,
-    selectedText,
-    "```",
-    "</vscode_context>",
-  ].join("\n");
-  return { text: contextText, summary };
-}
-
-export function appendEditorContext(prompt: string, mode = configuredSelectionMode()): string {
-  const ctx = buildEditorContextInfo(mode);
-  if (!ctx) {
-    return prompt;
-  }
-  return `${prompt.trimEnd()}\n\n${ctx.text}`;
+  const label = hasSelection ? "Selection" : "Cursor window";
+  return {
+    summary,
+    block: {
+      type: "resource",
+      resource: {
+        uri: document.uri.with({ fragment: `L${range.start.line + 1}-L${range.end.line + 1}` }).toString(),
+        mimeType: "text/plain",
+        text: `VS Code ${label.toLowerCase()}: ${summary}\nLanguage: ${document.languageId}\n${text}`,
+      },
+    },
+  };
 }
 
 function cursorWindow(doc: vscode.TextDocument, line: number): vscode.Range {

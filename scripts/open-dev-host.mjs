@@ -11,6 +11,8 @@ const primaryTestFile = join(testWorkspaceDir, "reasonix-smoke.md");
 const userDataDir = join(devDir, `vscode-user-data-${process.pid}`);
 const extensionsDir = join(devDir, "vscode-extensions");
 const userSettingsFile = join(userDataDir, "User", "settings.json");
+const devBinary = process.env.REASONIX_DEV_BINARY?.trim();
+const remoteDebuggingPort = process.env.VSCODE_REMOTE_DEBUGGING_PORT?.trim();
 
 mkdirSync(devDir, { recursive: true });
 prepareTestWorkspace();
@@ -25,7 +27,8 @@ writeFileSync(
     {
       "security.workspace.trust.enabled": false,
       "reasonix.autoStart": false,
-      "reasonix.uiLanguage": "zh-CN"
+      "reasonix.uiLanguage": "zh-CN",
+      ...(devBinary ? { "reasonix.binaryPath": resolve(devBinary) } : {})
     },
     null,
     2
@@ -48,6 +51,9 @@ const args = [
   testWorkspaceDir,
   primaryTestFile
 ];
+if (remoteDebuggingPort) {
+  args.unshift(`--remote-debugging-port=${remoteDebuggingPort}`);
+}
 
 console.log(`Opening VS Code Extension Development Host with ${testWorkspaceDir}`);
 const child = spawn(codeBin, args, {

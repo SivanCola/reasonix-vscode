@@ -54,6 +54,20 @@ test("JsonRpcPeer rejects pending requests on close", async () => {
   await assert.rejects(pending, /closed for test/);
 });
 
+test("JsonRpcPeer reports notification handler failures", async () => {
+  const writer = new CaptureWriter();
+  const errors: Error[] = [];
+  const peer = new JsonRpcPeer(writer, {
+    onNotification: () => { throw new Error("notification failed"); },
+    onError: (err) => errors.push(err),
+  });
+
+  peer.handleData('{"jsonrpc":"2.0","method":"session/update","params":{}}\n');
+  await tick();
+
+  assert.equal(errors[0]?.message, "notification failed");
+});
+
 function tick(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }

@@ -7,12 +7,17 @@ test("parseWebviewMessage accepts valid prompt messages", () => {
     command: "sendPrompt",
     text: "hi",
   });
-  assert.deepEqual(parseWebviewMessage({ command: "sendPrompt", text: "hi", collaborationMode: "plan", tokenMode: "economy", toolApprovalMode: "auto" }), {
+  assert.deepEqual(parseWebviewMessage({ command: "sendPrompt", text: "hi", collaborationMode: "plan", tokenMode: "delivery", toolApprovalMode: "auto" }), {
     command: "sendPrompt",
     text: "hi",
     collaborationMode: "plan",
-    tokenMode: "economy",
+    tokenMode: "delivery",
     toolApprovalMode: "auto",
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "sendPrompt", text: "legacy", tokenMode: "standard" }), {
+    command: "sendPrompt",
+    text: "legacy",
+    tokenMode: "balanced",
   });
 });
 
@@ -36,6 +41,9 @@ test("parseWebviewMessage accepts approval decisions with stable ids", () => {
 });
 
 test("parseWebviewMessage accepts product UI commands", () => {
+  assert.deepEqual(parseWebviewMessage({ command: "connect" }), {
+    command: "connect",
+  });
   assert.deepEqual(parseWebviewMessage({ command: "setContextMode", mode: "nearby" }), {
     command: "setContextMode",
     mode: "nearby",
@@ -48,15 +56,47 @@ test("parseWebviewMessage accepts product UI commands", () => {
     command: "loadSession",
     sessionId: "session-1",
   });
+  assert.deepEqual(parseWebviewMessage({ command: "deleteSession", sessionId: "session-1" }), {
+    command: "deleteSession",
+    sessionId: "session-1",
+  });
   assert.deepEqual(parseWebviewMessage({ command: "openToolPreview", index: 2 }), {
     command: "openToolPreview",
     index: 2,
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "openToolLocation", index: 2, locationIndex: 0 }), {
+    command: "openToolLocation",
+    index: 2,
+    locationIndex: 0,
   });
   assert.deepEqual(parseWebviewMessage({ command: "pickUiLanguage" }), {
     command: "pickUiLanguage",
   });
   assert.deepEqual(parseWebviewMessage({ command: "pickEffort" }), {
     command: "pickEffort",
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "setModel", value: "deepseek/deepseek-chat" }), {
+    command: "setModel",
+    value: "deepseek/deepseek-chat",
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "setEffort", optionId: "thought_level", value: "high" }), {
+    command: "setEffort",
+    optionId: "thought_level",
+    value: "high",
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "setExecutionMode", value: "goal" }), {
+    command: "setExecutionMode",
+    value: "goal",
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "setWorkMode", optionId: "work_mode", value: "delivery" }), {
+    command: "setWorkMode",
+    optionId: "work_mode",
+    value: "delivery",
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "setToolApprovalMode", optionId: "tool_approval", value: "auto" }), {
+    command: "setToolApprovalMode",
+    optionId: "tool_approval",
+    value: "auto",
   });
   assert.deepEqual(parseWebviewMessage({ command: "openNativeSettings" }), {
     command: "openNativeSettings",
@@ -89,4 +129,11 @@ test("parseWebviewMessage rejects malformed product UI commands", () => {
   assert.equal(parseWebviewMessage({ command: "updateSetting", key: "trace", value: "true" }), undefined);
   assert.equal(parseWebviewMessage({ command: "updateSetting", key: "uiLanguage", value: "fr" }), undefined);
   assert.equal(parseWebviewMessage({ command: "updateSetting", key: "unknown", value: true }), undefined);
+  assert.equal(parseWebviewMessage({ command: "setModel", value: "" }), undefined);
+  assert.equal(parseWebviewMessage({ command: "setModel", value: "x".repeat(241) }), undefined);
+  assert.equal(parseWebviewMessage({ command: "setEffort", optionId: "", value: "high" }), undefined);
+  assert.equal(parseWebviewMessage({ command: "setEffort", optionId: "effort", value: "" }), undefined);
+  assert.equal(parseWebviewMessage({ command: "setExecutionMode", value: "auto" }), undefined);
+  assert.equal(parseWebviewMessage({ command: "setWorkMode", optionId: "work_mode", value: "standard" }), undefined);
+  assert.equal(parseWebviewMessage({ command: "setToolApprovalMode", optionId: "tool_approval", value: "always" }), undefined);
 });
