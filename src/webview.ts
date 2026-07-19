@@ -1,4 +1,5 @@
 import type { AvailableCommand, ChangePreview, UsageData } from "./acpTypes";
+import { MAX_ATTACHMENTS, type PendingAttachment } from "./attachments";
 import type { ChatItem } from "./chatState";
 import { getComposerTrigger, replaceComposerTrigger, slashSuggestions, type ComposerTrigger } from "./composerSuggestions";
 import { shouldSubmitPromptOnKeydown } from "./keyboard";
@@ -93,6 +94,8 @@ const workspaceName = mustElement("workspaceName");
 const toolbarMeta = mustElement("toolbarMeta");
 const send = mustElement("send") as HTMLButtonElement;
 const contextButton = mustElement("contextButton") as HTMLButtonElement;
+const contextMenu = mustElement("contextMenu");
+const attachmentTray = mustElement("attachmentTray");
 const collaborationButton = mustElement("collaborationButton") as HTMLButtonElement;
 const collaborationModeLabel = mustElement("collaborationModeLabel");
 const collaborationMenu = mustElement("collaborationMenu");
@@ -136,6 +139,8 @@ const settingsModeTitle = mustElement("settingsModeTitle");
 
 let snapshot: Snapshot = normalizeSnapshot(vscode.getState());
 let sessionMenuOpen = false;
+let contextMenuOpen = false;
+let contextMenuMode: "root" | "sessions" = "root";
 let collaborationMenuOpen = false;
 let workModeMenuOpen = false;
 let controlsMenuOpen = false;
@@ -150,6 +155,7 @@ let toolApprovalMode: ToolApprovalMode = "ask";
 let compositionActive = false;
 let suggestionState: SuggestionState = emptySuggestionState();
 let resourceSuggestionRequestId = 0;
+let pendingAttachments: PendingAttachment[] = [];
 
 type SuggestionState = {
   trigger?: ComposerTrigger;
@@ -226,15 +232,35 @@ suggestionMenu.addEventListener("click", (event) => {
   }
 });
 
-newSession.addEventListener("click", () => vscode.postMessage({ command: "newSession" }));
-railNewSession.addEventListener("click", () => vscode.postMessage({ command: "newSession" }));
-contextButton.addEventListener("click", insertContextMention);
+newSession.addEventListener("click", () => {
+  clearAttachments();
+  vscode.postMessage({ command: "newSession" });
+});
+railNewSession.addEventListener("click", () => {
+  clearAttachments();
+  vscode.postMessage({ command: "newSession" });
+});
+contextButton.addEventListener("click", (event) => {
+  event.stopPropagation();
+  contextMenuOpen = !contextMenuOpen;
+  contextMenuMode = "root";
+  sessionMenuOpen = false;
+  collaborationMenuOpen = false;
+  workModeMenuOpen = false;
+  controlsMenuOpen = false;
+  runtimeMenuOpen = undefined;
+  renderMenus(snapshot);
+  if (contextMenuOpen) {
+    focusContextMenuChoice();
+  }
+});
 workModeButton.addEventListener("click", (event) => {
   event.stopPropagation();
   workModeMenuOpen = !workModeMenuOpen;
   sessionMenuOpen = false;
   collaborationMenuOpen = false;
   controlsMenuOpen = false;
+  contextMenuOpen = false;
   runtimeMenuOpen = undefined;
   renderMenus(snapshot);
   if (workModeMenuOpen) {
@@ -256,6 +282,7 @@ settingsButton.addEventListener("click", () => {
   collaborationMenuOpen = false;
   workModeMenuOpen = false;
   controlsMenuOpen = false;
+  contextMenuOpen = false;
   runtimeMenuOpen = undefined;
   render(snapshot);
 });
@@ -265,6 +292,7 @@ settingsBackButton.addEventListener("click", () => {
   collaborationMenuOpen = false;
   workModeMenuOpen = false;
   controlsMenuOpen = false;
+  contextMenuOpen = false;
   runtimeMenuOpen = undefined;
   render(snapshot);
 });
@@ -275,6 +303,7 @@ collaborationButton.addEventListener("click", (event) => {
   sessionMenuOpen = false;
   workModeMenuOpen = false;
   controlsMenuOpen = false;
+  contextMenuOpen = false;
   runtimeMenuOpen = undefined;
   renderMenus(snapshot);
   if (collaborationMenuOpen) {
@@ -332,6 +361,7 @@ sessionMenu.addEventListener("click", (event) => {
   collaborationMenuOpen = false;
   workModeMenuOpen = false;
   controlsMenuOpen = false;
+  contextMenuOpen = false;
   runtimeMenuOpen = undefined;
   renderMenus(snapshot);
 });
@@ -341,10 +371,11 @@ document.addEventListener("click", (event) => {
   if (target !== prompt && (!target || !suggestionMenu.contains(target))) {
     closeSuggestions();
   }
-  if (!sessionMenuOpen && !collaborationMenuOpen && !workModeMenuOpen && !controlsMenuOpen && !runtimeMenuOpen) {
+  if (!sessionMenuOpen && !contextMenuOpen && !collaborationMenuOpen && !workModeMenuOpen && !controlsMenuOpen && !runtimeMenuOpen) {
     return;
   }
   sessionMenuOpen = false;
+  contextMenuOpen = false;
   collaborationMenuOpen = false;
   workModeMenuOpen = false;
   controlsMenuOpen = false;
@@ -359,6 +390,66 @@ collaborationMenu.addEventListener("click", (event) => {
   if (isCollaborationMode(collaboration)) {
     chooseCollaborationMode(collaboration);
     return;
+  }
+});
+
+contextMenu.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const target = event.target as Element | null;
+  if (target?.closest<HTMLButtonElement>("button[data-context-back]")) {
+    contextMenuMode = "root";
+    renderContextMenu(snapshot);
+    return;
+  }
+  const sessionButton = target?.closest<HTMLButtonElement>("button[data-context-session-id]");
+  if (sessionButton?.dataset.contextSessionId) {
+    addAttachments([{
+      kind: "session",
+      name: sessionButton.dataset.contextSessionTitle ?? sessionButton.dataset.contextSessionId,
+      sessionId: sessionButton.dataset.contextSessionId,
+    }]);
+    closeContextMenu();
+    focusPromptSoon();
+    return;
+  }
+  const action = target?.closest<HTMLButtonElement>("button[data-context-action]")?.dataset.contextAction;
+  if (action === "attach") {
+    vscode.postMessage({ command: "pickAttachment" });
+    closeContextMenu();
+  } else if (action === "mention") {
+    closeContextMenu();
+    insertComposerTrigger("@");
+  } else if (action === "session") {
+    contextMenuMode = "sessions";
+    renderContextMenu(snapshot);
+  } else if (action === "command") {
+    closeContextMenu();
+    insertComposerTrigger("/");
+  }
+});
+
+contextMenu.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") {
+    return;
+  }
+  event.preventDefault();
+  if (contextMenuMode === "sessions") {
+    contextMenuMode = "root";
+    renderContextMenu(snapshot);
+    return;
+  }
+  closeContextMenu();
+  contextButton.focus();
+});
+
+attachmentTray.addEventListener("click", (event) => {
+  const button = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-remove-attachment]");
+  const index = Number(button?.dataset.removeAttachment);
+  if (Number.isInteger(index) && index >= 0 && index < pendingAttachments.length) {
+    pendingAttachments.splice(index, 1);
+    renderAttachmentTray();
+    updateSendButton(snapshot);
+    focusPromptSoon();
   }
 });
 
@@ -432,6 +523,7 @@ function handleSessionClick(event: MouseEvent): void {
   const sessionId = button?.dataset.sessionId;
   if (sessionId) {
     sessionMenuOpen = false;
+    clearAttachments();
     vscode.postMessage({ command: "loadSession", sessionId });
   }
 }
@@ -520,6 +612,7 @@ settingsView.addEventListener("click", (event) => {
     collaborationMenuOpen = false;
     workModeMenuOpen = false;
     controlsMenuOpen = false;
+    contextMenuOpen = false;
     runtimeMenuOpen = undefined;
     render(snapshot);
     return;
@@ -556,6 +649,12 @@ settingsView.addEventListener("click", (event) => {
   }
   if (key === "includeSelectionMode" && isContextMode(value)) {
     updateSetting(key, value);
+    return;
+  }
+
+  const approval = target?.closest<HTMLButtonElement>("button[data-settings-approval]")?.dataset.settingsApproval;
+  if (isToolApprovalMode(approval)) {
+    chooseToolApprovalMode(approval);
   }
 });
 
@@ -596,6 +695,10 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
       return;
     case "notice":
       appendNotice(message.text);
+      return;
+    case "attachmentsPicked":
+      addAttachments(message.attachments);
+      focusPromptSoon();
       return;
     case "resourceSuggestions":
       receiveResourceSuggestions(message.requestId, message.query, message.items);
@@ -679,6 +782,7 @@ function render(state: Snapshot): void {
     collaborationMenuOpen = false;
     workModeMenuOpen = false;
     controlsMenuOpen = false;
+    contextMenuOpen = false;
     runtimeMenuOpen = undefined;
     closeSuggestions();
   }
@@ -686,12 +790,14 @@ function render(state: Snapshot): void {
     collaborationMenuOpen = false;
     workModeMenuOpen = false;
     controlsMenuOpen = false;
+    contextMenuOpen = false;
     runtimeMenuOpen = undefined;
   }
   collaborationButton.setAttribute("aria-expanded", String(collaborationMenuOpen));
   workModeButton.setAttribute("aria-expanded", String(workModeMenuOpen));
   updateSendButton(state);
   updateModeUi();
+  renderAttachmentTray();
   renderMenus(state);
   renderSettings(state);
 
@@ -714,7 +820,7 @@ function updateSendButton(state: Snapshot): void {
   send.textContent = state.running ? label("stop") : "↑";
   send.title = state.running ? label("stopTurn") : label("sendShortcut");
   send.classList.toggle("danger", state.running);
-  send.disabled = !state.running && prompt.value.trim() === "";
+  send.disabled = !state.running && prompt.value.trim() === "" && pendingAttachments.length === 0;
 }
 
 function renderConnectionNotice(state: Snapshot): void {
@@ -733,11 +839,11 @@ function renderConnectionNotice(state: Snapshot): void {
   connectionSettings.textContent = label("settings");
 }
 
-function insertContextMention(): void {
+function insertComposerTrigger(token: "@" | "/"): void {
   const start = prompt.selectionStart;
   const end = prompt.selectionEnd;
   const needsSpace = start > 0 && !/\s/.test(prompt.value[start - 1] ?? "");
-  prompt.setRangeText(`${needsSpace ? " " : ""}@`, start, end, "end");
+  prompt.setRangeText(`${needsSpace ? " " : ""}${token}`, start, end, "end");
   prompt.focus();
   resizePrompt();
   updateSendButton(snapshot);
@@ -801,6 +907,7 @@ function focusToolApprovalOption(mode: ToolApprovalMode): void {
 
 function renderMenus(state: Snapshot): void {
   renderSessionPopover(state);
+  renderContextMenu(state);
   renderCollaborationMenu(state);
   renderWorkModeMenu(state);
   renderControlsMenu();
@@ -988,6 +1095,7 @@ function openRuntimeMenu(event: Event, kind: RuntimeMenu): void {
   collaborationMenuOpen = false;
   workModeMenuOpen = false;
   controlsMenuOpen = false;
+  contextMenuOpen = false;
   renderMenus(snapshot);
   if (nextOpen) {
     focusRuntimeOption(nextOpen);
@@ -1323,6 +1431,139 @@ function renderSessionList(container: HTMLElement, state: Snapshot): void {
   }
 }
 
+function attachmentKey(attachment: PendingAttachment): string {
+  return attachment.kind === "session" ? `session:${attachment.sessionId}` : `file:${attachment.uri}`;
+}
+
+function addAttachments(attachments: PendingAttachment[]): void {
+  for (const attachment of attachments) {
+    if (pendingAttachments.length >= MAX_ATTACHMENTS) {
+      break;
+    }
+    const key = attachmentKey(attachment);
+    if (!pendingAttachments.some((existing) => attachmentKey(existing) === key)) {
+      pendingAttachments.push(attachment);
+    }
+  }
+  renderAttachmentTray();
+  updateSendButton(snapshot);
+}
+
+function clearAttachments(): void {
+  if (pendingAttachments.length === 0) {
+    return;
+  }
+  pendingAttachments = [];
+  renderAttachmentTray();
+  updateSendButton(snapshot);
+}
+
+function renderAttachmentTray(): void {
+  attachmentTray.textContent = "";
+  pendingAttachments.forEach((attachment, index) => {
+    const chip = document.createElement("span");
+    chip.className = `attachment-chip attachment-chip--${attachment.kind}`;
+    chip.title = attachment.name;
+    const icon = document.createElement("span");
+    icon.className = "attachment-chip__icon";
+    icon.textContent = attachment.kind === "session" ? "#" : attachment.kind === "image" ? "▦" : "≡";
+    icon.setAttribute("aria-hidden", "true");
+    const name = document.createElement("span");
+    name.className = "attachment-chip__name";
+    name.textContent = attachment.name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attachment-chip__remove";
+    remove.dataset.removeAttachment = String(index);
+    remove.title = label("removeAttachment");
+    remove.setAttribute("aria-label", `${label("removeAttachment")}: ${attachment.name}`);
+    remove.textContent = "×";
+    chip.append(icon, name, remove);
+    attachmentTray.append(chip);
+  });
+  attachmentTray.hidden = pendingAttachments.length === 0;
+}
+
+function closeContextMenu(): void {
+  contextMenuOpen = false;
+  contextMenuMode = "root";
+  renderContextMenu(snapshot);
+}
+
+function focusContextMenuChoice(): void {
+  contextMenu.querySelector<HTMLButtonElement>("button[data-context-action]")?.focus();
+}
+
+function contextMenuRow(action: string, titleText: string, detailText: string, iconText: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "collaboration-menu__row context-menu__row";
+  button.dataset.contextAction = action;
+  button.setAttribute("role", "menuitem");
+  const icon = document.createElement("span");
+  icon.className = "collaboration-menu__icon";
+  icon.textContent = iconText;
+  icon.setAttribute("aria-hidden", "true");
+  const copy = document.createElement("span");
+  copy.className = "collaboration-menu__copy";
+  const title = document.createElement("strong");
+  title.textContent = titleText;
+  copy.append(title);
+  if (detailText) {
+    const detail = document.createElement("small");
+    detail.textContent = detailText;
+    copy.append(detail);
+  }
+  button.append(icon, copy);
+  return button;
+}
+
+function renderContextMenu(state: Snapshot): void {
+  contextMenu.textContent = "";
+  if (contextMenuMode === "sessions") {
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "menu-row context-menu__back";
+    back.dataset.contextBack = "true";
+    back.setAttribute("role", "menuitem");
+    back.textContent = `← ${label("backToChat")}`;
+    contextMenu.append(back);
+    if (state.sessions.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "menu-empty";
+      empty.textContent = label("noSessions");
+      contextMenu.append(empty);
+    } else {
+      for (const session of state.sessions) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "menu-row context-menu__session";
+        row.dataset.contextSessionId = session.id;
+        row.dataset.contextSessionTitle = session.title;
+        row.setAttribute("role", "menuitem");
+        const title = document.createElement("span");
+        title.textContent = session.title;
+        const detail = document.createElement("small");
+        detail.textContent = relativeTime(session.updatedAt);
+        row.append(title, detail);
+        contextMenu.append(row);
+      }
+    }
+  } else {
+    contextMenu.append(
+      contextMenuRow("attach", label("attachFileOrImage"), label("attachFileOrImageDetail"), "⇧"),
+      contextMenuRow("mention", label("refFileOrFolder"), label("refFileOrFolderDetail"), "@"),
+      contextMenuRow("session", label("refSession"), label("refSessionDetail"), "#"),
+      contextMenuRow("command", label("useCommandOrSkill"), label("useCommandOrSkillDetail"), "/"),
+    );
+  }
+  contextMenu.hidden = !contextMenuOpen;
+  contextButton.setAttribute("aria-expanded", String(contextMenuOpen));
+  if (contextMenuOpen) {
+    positionAnchoredMenu(contextMenu, contextButton);
+  }
+}
+
 function renderSettings(state: Snapshot): void {
   settingsView.textContent = "";
   if (!settingsOpen) {
@@ -1340,12 +1581,14 @@ function renderSettings(state: Snapshot): void {
 
   const layout = document.createElement("div");
   layout.className = "settings-layout";
-  const rail = document.createElement("nav");
-  rail.className = "settings-rail";
-  rail.append(
-    settingsTabButton("connection", "≡", label("apiConfiguration")),
-    settingsTabButton("interface", "◇", label("interface")),
-    settingsTabButton("behavior", "⚙", label("behavior")),
+  const tabs = document.createElement("nav");
+  tabs.className = "settings-tabs";
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", label("settings"));
+  tabs.append(
+    settingsTabButton("connection", label("apiConfiguration")),
+    settingsTabButton("interface", label("interface")),
+    settingsTabButton("behavior", label("behavior")),
   );
 
   const content = document.createElement("div");
@@ -1387,28 +1630,25 @@ function renderSettings(state: Snapshot): void {
         label("behavior"),
         toggleSetting("autoStart", label("autoStart"), state.settings.autoStart),
         toggleSetting("trace", label("trace"), state.settings.trace),
-        staticSettingRow(label("approval"), label("approvalReview")),
+        approvalSetting(state),
         settingsActionRow(settingsActionButton("openNativeSettings", label("openVsCodeSettings"))),
       ),
     );
   }
 
-  layout.append(rail, content);
+  layout.append(tabs, content);
   shell.append(head, layout);
   settingsView.append(shell);
 }
 
-function settingsTabButton(tab: SettingsTab, iconText: string, titleText: string): HTMLButtonElement {
+function settingsTabButton(tab: SettingsTab, titleText: string): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
+  button.className = tab === settingsTab ? "settings-tab selected" : "settings-tab";
   button.dataset.settingsTab = tab;
-  button.className = tab === settingsTab ? "selected" : "";
-  const icon = document.createElement("span");
-  icon.className = "settings-tab-icon";
-  icon.textContent = iconText;
-  const title = document.createElement("span");
-  title.textContent = titleText;
-  button.append(icon, title);
+  button.setAttribute("role", "tab");
+  button.setAttribute("aria-selected", String(tab === settingsTab));
+  button.textContent = titleText;
   return button;
 }
 
@@ -1457,6 +1697,33 @@ function staticSettingRow(labelText: string, value: string): HTMLElement {
   detail.className = "setting-detail";
   detail.textContent = value;
   row.append(name, detail);
+  return row;
+}
+
+function approvalSetting(state: Snapshot): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "setting-row";
+  const name = document.createElement("div");
+  name.className = "setting-label";
+  name.textContent = label("toolApprovals");
+  const group = document.createElement("div");
+  group.className = "segmented";
+  const advertised = state.toolApprovalOptions.length > 0;
+  const disabled = !state.toolApprovalOptionId || state.disconnected || state.running || controlSelectionPending !== undefined;
+  for (const mode of toolApprovalModes) {
+    if (advertised && !state.toolApprovalOptions.some((option) => option.value === mode)) {
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = mode === state.toolApprovalMode ? "selected" : "";
+    button.dataset.settingsApproval = mode;
+    button.disabled = !advertised || disabled;
+    button.title = toolApprovalModeDetail(mode);
+    button.textContent = toolApprovalModeLabel(mode);
+    group.append(button);
+  }
+  row.append(name, group);
   return row;
 }
 
@@ -2273,12 +2540,15 @@ function submitPrompt(): void {
     return;
   }
   const text = prompt.value.trim();
-  if (text === "") {
+  if (text === "" && pendingAttachments.length === 0) {
     return;
   }
-  vscode.postMessage({ command: "sendPrompt", text, collaborationMode, tokenMode, toolApprovalMode });
+  const attachments = pendingAttachments;
+  pendingAttachments = [];
+  vscode.postMessage({ command: "sendPrompt", text, collaborationMode, tokenMode, toolApprovalMode, attachments });
   prompt.value = "";
   resizePrompt();
+  renderAttachmentTray();
   updateSendButton(snapshot);
   closeSuggestions();
 }
@@ -2678,6 +2948,15 @@ function mustElement(id: string): HTMLElement {
 type LabelKey =
   | "add"
   | "addContext"
+  | "attachFileOrImage"
+  | "attachFileOrImageDetail"
+  | "refFileOrFolder"
+  | "refFileOrFolderDetail"
+  | "refSession"
+  | "refSessionDetail"
+  | "useCommandOrSkill"
+  | "useCommandOrSkillDetail"
+  | "removeAttachment"
   | "always"
   | "act"
   | "apiConfiguration"
@@ -2827,6 +3106,15 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
   en: {
     add: "Add",
     addContext: "Add file or folder context",
+    attachFileOrImage: "Attach file or image",
+    attachFileOrImageDetail: "Pick from this device and attach to the message",
+    refFileOrFolder: "Reference file or folder",
+    refFileOrFolderDetail: "Pick context from the current workspace",
+    refSession: "Reference past session",
+    refSessionDetail: "Add a recent session to the current context",
+    useCommandOrSkill: "Use command or skill",
+    useCommandOrSkillDetail: "Browse available commands and skills",
+    removeAttachment: "Remove attachment",
     always: "Always",
     act: "Act",
     apiConfiguration: "API Configuration",
@@ -2975,6 +3263,15 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
   zh: {
     add: "加入",
     addContext: "添加文件或文件夹上下文",
+    attachFileOrImage: "添加文件或图片",
+    attachFileOrImageDetail: "从本机选择并附加到消息",
+    refFileOrFolder: "引用文件或文件夹",
+    refFileOrFolderDetail: "从当前工作区选择上下文",
+    refSession: "引用历史会话",
+    refSessionDetail: "将最近会话加入当前上下文",
+    useCommandOrSkill: "使用命令或 Skill",
+    useCommandOrSkillDetail: "浏览可用命令和技能",
+    removeAttachment: "移除附件",
     always: "总是允许",
     act: "执行",
     apiConfiguration: "API 配置",
@@ -3060,7 +3357,7 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     outputTokens: "输出",
     pending: "等待中",
     placeholder: "给 Reasonix 发消息...",
-    plan: "规划",
+    plan: "计划",
     planDetail: "先只读分析并产出计划，确认前避免副作用。",
     composerHint: "/ 命令 · @ 文件/文件夹",
     pathPlaceholder: "从 PATH 查找",

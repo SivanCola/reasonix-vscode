@@ -22,6 +22,7 @@ import type {
   UsageData,
 } from "./acpTypes";
 import { appendApproval, appendNotice, appendUserMessage, applySessionUpdate, isQuestionRequest, resolveApproval as resolveApprovalItem, type ChatItem } from "./chatState";
+import { attachmentToBlock, isImageMime, mimeFromFileName, MAX_ATTACHMENTS, type PendingAttachment } from "./attachments";
 import { buildEditorContextBlock, configuredSelectionMode, type IncludeSelectionMode } from "./editorContext";
 import { WorkspaceFileBridge } from "./fileBridge";
 import { DiffPreviewProvider } from "./preview";
@@ -683,6 +684,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
           message.collaborationMode,
           message.tokenMode,
           message.text,
+          message.attachments,
         );
         return;
       case "cancel":
@@ -693,6 +695,9 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
         return;
       case "newSession":
         await this.newSession();
+        return;
+      case "pickAttachment":
+        await this.pickAttachments();
         return;
       case "setContextMode":
         await this.setContextMode(message.mode);
@@ -944,6 +949,40 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
     void this.view?.webview.postMessage({ type: "resourceSuggestions", requestId, query, items });
   }
 
+  private async pickAttachments(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: true,
+      openLabel: "Attach",
+      title: "Attach files or images",
+    });
+    if (!picked || picked.length === 0) {
+      return;
+    }
+    const folder = this.currentWorkspaceFolder();
+    const state = folder ? this.stateFor(folder) : undefined;
+    const supportsImage = state?.agentCapabilities?.promptCapabilities?.image === true;
+    const attachments: PendingAttachment[] = [];
+    let skippedImage = false;
+    for (const uri of picked.slice(0, MAX_ATTACHMENTS)) {
+      const name = path.basename(uri.fsPath);
+      const mimeType = mimeFromFileName(name);
+      const kind = isImageMime(mimeType) ? "image" : "file";
+      if (kind === "image" && !supportsImage) {
+        skippedImage = true;
+        continue;
+      }
+      attachments.push({ kind, name, uri: uri.toString(), mimeType });
+    }
+    if (skippedImage) {
+      void this.view?.webview.postMessage({ type: "notice", text: "The connected Reasonix does not support image prompts; image files were skipped." });
+    }
+    if (attachments.length > 0) {
+      void this.view?.webview.postMessage({ type: "attachmentsPicked", attachments });
+    }
+  }
+
   private async insertMessage(index: number): Promise<void> {
     const text = this.messageTextAt(index);
     if (!text) {
@@ -1063,6 +1102,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
     collaborationMode?: CollaborationMode,
     workMode?: TokenMode,
     displayText = text,
+    attachments: PendingAttachment[] = [],
   ): Promise<void> {
     const folder = this.currentWorkspaceFolder();
     if (!folder) {
@@ -1072,7 +1112,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
     const state = this.stateFor(folder);
     const key = workspaceKey(folder);
     const trimmed = text.trim();
-    if (trimmed === "" || state.running || this.sending.has(key)) {
+    if ((trimmed === "" && attachments.length === 0) || state.running || this.sending.has(key)) {
       return;
     }
     this.sending.add(key);
@@ -1094,14 +1134,30 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
         this.workModeOption(state) !== undefined,
       );
       const withMentions = await buildPromptBlocks(providerPrompt, folder.uri.fsPath);
-      let blocks = appendContext ? await this.withConfirmedEditorContext(withMentions.blocks) : withMentions.blocks;
+      let blocks: ContentBlock[] | undefined = withMentions.blocks;
+      if (attachments.length > 0) {
+        try {
+          const readFile = async (uri: string) => vscode.workspace.fs.readFile(vscode.Uri.parse(uri));
+          const attachmentBlocks: ContentBlock[] = [];
+          for (const attachment of attachments.slice(0, MAX_ATTACHMENTS)) {
+            attachmentBlocks.push(await attachmentToBlock(attachment, readFile));
+          }
+          blocks = [...blocks, ...attachmentBlocks];
+        } catch (err) {
+          appendNotice(state.items, `Attachment failed: ${errorMessage(err)}`);
+          this.appendOutput(`Attachment read failed: ${errorMessage(err)}`, folder);
+          this.postSnapshot();
+          return;
+        }
+      }
+      blocks = appendContext ? await this.withConfirmedEditorContext(blocks) : blocks;
       if (!blocks) {
         return;
       }
       if (withMentions.mentions.length > 0) {
         this.appendOutput(`Attached ${withMentions.mentions.length} @ resource mention(s): ${withMentions.mentions.map((mention) => mention.relativePath).join(", ")}`, folder);
       }
-      const visiblePrompt = displayText.trim() || trimmed;
+      const visiblePrompt = displayText.trim() || trimmed || attachments.map((attachment) => attachment.name).join(", ");
       appendUserMessage(state.items, visiblePrompt);
       await this.updateCurrentSessionTitle(folder, visiblePrompt);
       state.running = true;
@@ -1151,6 +1207,20 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
       return undefined;
     }
     return action === "Send without Context" ? blocks : [...blocks, info.block];
+  }
+
+  private async applyDefaultToolApproval(client: AcpClient, state: WorkspaceChatState, folder: vscode.WorkspaceFolder): Promise<void> {
+    const option = this.toolApprovalOption(state);
+    if (!option || option.currentValue === "auto" || !option.options.some((candidate) => candidate.value === "auto")) {
+      return;
+    }
+    try {
+      await client.setConfigOption(option.id, "auto");
+      this.syncSessionState(state, client.sessionState);
+      this.appendOutput(`New session defaults tool approval to auto (${option.id}).`, folder);
+    } catch (err) {
+      this.appendOutput(`Could not set default tool approval: ${errorMessage(err)}`, folder);
+    }
   }
 
   private async applyComposerAxes(
@@ -1285,12 +1355,15 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
     });
     this.clients.set(key, client);
     try {
-      await client.start();
+      const started = await client.start();
       state.disconnected = false;
       state.status = "Idle";
       state.agentCapabilities = client.capabilities;
       state.authMethods = [...client.authMethods];
       this.clearReconnectTimer(key);
+      if (started.isNewSession) {
+        await this.applyDefaultToolApproval(client, state, folder);
+      }
       await this.refreshSessions(client, folder);
       if (!client.capabilities) {
         await this.refreshStatus(client, folder);
@@ -1850,6 +1923,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
           <button id="connectionSettings" class="connection-notice__action" type="button" hidden>Settings</button>
         </div>
       </div>
+      <div id="attachmentTray" class="attachment-tray" aria-live="polite" hidden></div>
       <div class="input-wrap">
         <textarea id="prompt" rows="2" placeholder="Type your task here..."></textarea>
         <div id="composerHint" class="composer-hint">Type @ for context, / for slash command...</div>
@@ -1857,7 +1931,10 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
         <button id="send" class="send-button" type="submit" aria-label="Send">↑</button>
       </div>
       <div class="composer-footer">
-        <button id="contextButton" class="composer-control context-button" title="Add context" aria-label="Add context" type="button">+</button>
+        <div class="context-control">
+          <button id="contextButton" class="composer-control context-button" title="Add context" aria-label="Add context" aria-haspopup="menu" aria-expanded="false" aria-controls="contextMenu" type="button">+</button>
+          <div id="contextMenu" class="popover context-menu" role="menu" hidden></div>
+        </div>
         <div class="collaboration-control">
           <button id="collaborationButton" class="composer-select collaboration-button" title="Collaboration modes" aria-label="Collaboration modes" aria-haspopup="menu" aria-expanded="false" aria-controls="collaborationMenu" type="button">
             <span id="collaborationModeLabel" class="composer-select__label">Normal</span>

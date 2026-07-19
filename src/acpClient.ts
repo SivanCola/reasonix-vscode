@@ -110,9 +110,9 @@ export class AcpClient {
     return this.state;
   }
 
-  async start(): Promise<string> {
+  async start(): Promise<{ sessionId: string; isNewSession: boolean }> {
     if (this.sessionId && this.connected) {
-      return this.sessionId;
+      return { sessionId: this.sessionId, isNewSession: false };
     }
     const args = ["acp"];
     if (this.options.model && this.options.model.trim() !== "") {
@@ -168,7 +168,7 @@ export class AcpClient {
       try {
         const resumed = await this.openExistingSession(previous);
         this.applySessionState(resumed);
-        return previous;
+        return { sessionId: previous, isNewSession: false };
       } catch (err) {
         this.appendLine(`Could not restore Reasonix session ${previous}: ${errorMessage(err)}`);
         this.sessionId = undefined;
@@ -185,7 +185,7 @@ export class AcpClient {
     this.sessionId = created.sessionId;
     this.applySessionState(created);
     this.options.onSessionId(created.sessionId);
-    return created.sessionId;
+    return { sessionId: created.sessionId, isNewSession: true };
   }
 
   async sendPrompt(prompt: string | ContentBlock[]): Promise<SessionPromptResult> {

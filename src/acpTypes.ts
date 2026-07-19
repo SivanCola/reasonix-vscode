@@ -20,6 +20,7 @@ export interface JsonRpcResponse {
 
 export type ContentBlock =
   | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
   | {
       type: "resource";
       resource: {

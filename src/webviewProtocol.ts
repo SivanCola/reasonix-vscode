@@ -1,3 +1,5 @@
+import type { PendingAttachment } from "./attachments";
+import { isPendingAttachment, MAX_ATTACHMENTS } from "./attachments";
 import type { ResourceSuggestion } from "./resourceSuggestions";
 
 export type WebviewToHostMessage =
@@ -7,10 +9,12 @@ export type WebviewToHostMessage =
       collaborationMode?: CollaborationMode;
       tokenMode?: TokenMode;
       toolApprovalMode?: ToolApprovalMode;
+      attachments?: PendingAttachment[];
     }
   | { command: "cancel" }
   | { command: "connect" }
   | { command: "newSession" }
+  | { command: "pickAttachment" }
   | { command: "setContextMode"; mode: "off" | "selectionOnly" | "nearby" }
   | { command: "updateSetting"; key: SettingKey; value: string | boolean }
   | { command: "pickModel" }
@@ -47,6 +51,7 @@ export type HostToWebviewMessage =
   | { type: "stateSnapshot"; state: unknown }
   | { type: "notice"; text: string }
   | { type: "resourceSuggestions"; requestId: number; query: string; items: ResourceSuggestion[] }
+  | { type: "attachmentsPicked"; attachments: PendingAttachment[] }
   | { type: "openSettings" };
 
 export function parseWebviewMessage(value: unknown): WebviewToHostMessage | undefined {
@@ -54,17 +59,27 @@ export function parseWebviewMessage(value: unknown): WebviewToHostMessage | unde
     return undefined;
   }
   switch (value.command) {
-    case "sendPrompt":
+    case "sendPrompt": {
       if (typeof value.text !== "string") {
         return undefined;
       }
-      return withPromptModes({
+      const attachments = parseAttachments(value.attachments);
+      if (attachments === undefined && value.attachments !== undefined) {
+        return undefined;
+      }
+      const message = withPromptModes({
         command: "sendPrompt",
         text: value.text,
       }, value);
+      if (attachments !== undefined) {
+        message.attachments = attachments;
+      }
+      return message;
+    }
     case "cancel":
     case "connect":
     case "newSession":
+    case "pickAttachment":
     case "pickModel":
     case "pickEffort":
     case "pickUiLanguage":
@@ -131,6 +146,16 @@ export function parseWebviewMessage(value: unknown): WebviewToHostMessage | unde
 
 function isRuntimeOptionValue(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "" && value.length <= 240;
+}
+
+function parseAttachments(value: unknown): PendingAttachment[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.length > MAX_ATTACHMENTS) {
+    return undefined;
+  }
+  return value.every(isPendingAttachment) ? value : undefined;
 }
 
 function withPromptModes(

@@ -19,6 +19,24 @@ test("parseWebviewMessage accepts valid prompt messages", () => {
     text: "legacy",
     tokenMode: "balanced",
   });
+  assert.deepEqual(parseWebviewMessage({
+    command: "sendPrompt",
+    text: "",
+    attachments: [
+      { kind: "file", name: "a.ts", uri: "file:///a.ts", mimeType: "text/plain" },
+      { kind: "session", name: "Fix bug", sessionId: "s-1" },
+    ],
+  }), {
+    command: "sendPrompt",
+    text: "",
+    attachments: [
+      { kind: "file", name: "a.ts", uri: "file:///a.ts", mimeType: "text/plain" },
+      { kind: "session", name: "Fix bug", sessionId: "s-1" },
+    ],
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "pickAttachment" }), {
+    command: "pickAttachment",
+  });
 });
 
 test("parseWebviewMessage rejects malformed messages", () => {
@@ -26,6 +44,10 @@ test("parseWebviewMessage rejects malformed messages", () => {
   assert.equal(parseWebviewMessage({ command: "approvalDecision", id: "1" }), undefined);
   assert.equal(parseWebviewMessage({ command: "unknown", text: "x" }), undefined);
   assert.equal(parseWebviewMessage(null), undefined);
+  assert.equal(parseWebviewMessage({ command: "sendPrompt", text: "hi", attachments: "nope" }), undefined);
+  assert.equal(parseWebviewMessage({ command: "sendPrompt", text: "hi", attachments: [{ kind: "folder", name: "src", uri: "file:///src" }] }), undefined);
+  assert.equal(parseWebviewMessage({ command: "sendPrompt", text: "hi", attachments: [{ kind: "file", name: "a.ts" }] }), undefined);
+  assert.equal(parseWebviewMessage({ command: "sendPrompt", text: "hi", attachments: [1, 2, 3, 4, 5, 6] }), undefined);
   assert.deepEqual(parseWebviewMessage({ command: "sendPrompt", text: "hi", collaborationMode: "bad", tokenMode: "bad", toolApprovalMode: "bad" }), {
     command: "sendPrompt",
     text: "hi",

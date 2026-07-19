@@ -27,7 +27,7 @@ const builds = [
   },
   {
     ...common,
-    entryPoints: ["test/acpProtocol.test.ts", "test/jsonRpc.test.ts", "test/chatState.test.ts", "test/webviewProtocol.test.ts", "test/sanitize.test.ts", "test/keyboard.test.ts", "test/resourceMentions.test.ts", "test/resourceSuggestions.test.ts", "test/slashCommands.test.ts", "test/composerSuggestions.test.ts"],
+    entryPoints: ["test/acpProtocol.test.ts", "test/attachments.test.ts", "test/jsonRpc.test.ts", "test/chatState.test.ts", "test/webviewProtocol.test.ts", "test/sanitize.test.ts", "test/keyboard.test.ts", "test/resourceMentions.test.ts", "test/resourceSuggestions.test.ts", "test/slashCommands.test.ts", "test/composerSuggestions.test.ts"],
     outdir: "dist/test",
     platform: "node",
     format: "cjs",

@@ -2,7 +2,7 @@
   "name": "reasonix-agent",
   "displayName": "Reasonix",
   "description": "Cache-first Reasonix coding agent integration for VS Code.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "SivanLiu",
   "license": "MIT",
   "homepage": "https://github.com/SivanCola/reasonix-vscode#readme",

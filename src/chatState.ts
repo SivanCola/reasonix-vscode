@@ -191,7 +191,10 @@ export function isQuestionRequest(params: PermissionRequestParams): boolean {
 }
 
 function contentText(content: import("./acpTypes").ContentBlock): string {
-  return content.type === "text" ? content.text : content.resource.text ?? "";
+  if (content.type === "text") {
+    return content.text;
+  }
+  return content.type === "image" ? "[image]" : content.resource.text ?? "";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

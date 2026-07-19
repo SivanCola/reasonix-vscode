@@ -19,6 +19,7 @@ Reasonix for VS Code 把本地 Reasonix coding agent 带进编辑器。它实现
 - ACP 文件覆盖层可读取未保存缓冲区并执行受保护的 workspace edit；客户端终端会在 VS Code 内实时展示命令。
 - 当前文件、选区、光标附近上下文与 `@` 引用通过当前 user turn 的 ACP resource block 发送。
 - 普通聊天在追加编辑器上下文前会先确认。
+- 输入区 `+` 菜单支持附加本机文件或图片（后端支持时以 image block 发送）、`@` 工作区引用、历史会话引用和斜杠命令。
 - 工具调用卡片展示 raw input、执行结果和后端提供的 diff preview。
 - 审批与结构化问题使用不同交互；Ask 问题永远不会被自动回答。
 - 参考 Reasonix 桌面端的聊天界面：紧凑命令栏，以及由 ACP 会话轴驱动的独立“执行方式”“工作模式”和询问/自动/Yolo 工具权限菜单。

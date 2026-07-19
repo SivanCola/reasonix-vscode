@@ -142,6 +142,9 @@ function isContentBlock(value: unknown): value is ContentBlock {
   if (value.type === "text") {
     return typeof value.text === "string";
   }
+  if (value.type === "image") {
+    return typeof value.data === "string" && nonEmptyString(value.mimeType);
+  }
   return value.type === "resource" && isRecord(value.resource) && nonEmptyString(value.resource.uri)
     && (value.resource.text === undefined || typeof value.resource.text === "string")
     && (value.resource.mimeType === undefined || typeof value.resource.mimeType === "string");

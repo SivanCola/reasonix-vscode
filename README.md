@@ -19,6 +19,7 @@ The extension does not bundle a Reasonix binary. It uses `reasonix.binaryPath` w
 - ACP filesystem overlay reads unsaved buffers and applies guarded workspace edits; client-owned terminals stream commands in VS Code.
 - Current file, selection, nearby cursor context, and `@` mentions sent as ACP resource blocks on the current user turn.
 - Send-time confirmation before editor context is appended to a user turn.
+- Composer `+` menu to attach local files or images (sent as image blocks when the backend supports them), reference workspace files or folders, reference past sessions, and insert slash commands.
 - Tool-call cards with raw input, results, and backend-provided diff previews.
 - Separate inline approval and structured question controls; Ask questions are never auto-answered.
 - Reasonix-styled chat surface with independent Execution Method, Work Mode, and Ask/Auto/Yolo tool permission menus backed by ACP session axes.
