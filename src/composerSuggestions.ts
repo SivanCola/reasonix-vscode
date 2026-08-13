@@ -55,13 +55,44 @@ export function getComposerTrigger(value: string, selectionStart: number, select
 export function replaceComposerTrigger(value: string, trigger: ComposerTrigger, insertText: string): { value: string; cursor: number } {
   const before = value.slice(0, trigger.start);
   const after = value.slice(trigger.end);
-  const token = trigger.kind === "resource" ? `@${insertText}` : insertText.startsWith("/") ? insertText : `/${insertText}`;
+  const token = trigger.kind === "resource" ? quotedMentionToken(insertText) : insertText.startsWith("/") ? insertText : `/${insertText}`;
   const replacement = /^\s/.test(after) ? token : `${token} `;
   const nextValue = `${before}${replacement}${after}`;
   return {
     value: nextValue,
     cursor: before.length + replacement.length,
   };
+}
+
+const MENTION_TOKEN_BREAKERS = /[\s"')\]}>;,:]|%/;
+
+/**
+ * Wraps paths containing mention-breaking characters in quotes so the
+ * inserted @ token stays fully human-readable; percent encoding is only a
+ * fallback for paths containing every quote style (or "%").
+ */
+function quotedMentionToken(path: string): string {
+  const base = path.includes("/") || path.includes(".") ? path : `./${path}`;
+  if (!MENTION_TOKEN_BREAKERS.test(base)) {
+    return `@${base}`;
+  }
+  if (base.includes("%")) {
+    return percentEncodeMention(base);
+  }
+  if (!base.includes('"')) {
+    return `@"${base}"`;
+  }
+  if (!base.includes("'")) {
+    return `@'${base}'`;
+  }
+  return percentEncodeMention(base);
+}
+
+function percentEncodeMention(path: string): string {
+  // All breaking characters are ASCII, so single-byte percent encoding is safe.
+  return "@" + Array.from(path)
+    .map((ch) => (MENTION_TOKEN_BREAKERS.test(ch) ? `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}` : ch))
+    .join("");
 }
 
 export function slashSuggestions(query: string, locale: string, limit = 8): SlashSuggestion[] {

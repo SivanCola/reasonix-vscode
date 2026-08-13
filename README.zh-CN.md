@@ -12,6 +12,35 @@ Reasonix for VS Code 把本地 Reasonix coding agent 带进编辑器。它实现
 
 扩展默认不捆绑 Reasonix 二进制。它会优先使用 `reasonix.binaryPath`，未配置时再从 `PATH` 查找 `reasonix`。
 
+## 自定义版：右键加聊天、Ctrl+L 与拖拽
+
+本 fork 在上游扩展之上新增三个输入便捷功能：
+
+- **右键 → "Reasonix: Add to Chat"**：在资源管理器中右键文件/文件夹（或编辑器内右键）即可把工作区相对 `@` 引用插入聊天输入框光标处；编辑器中有选中代码时会连同文件引用一起插入。
+- **Ctrl+L**（macOS 为 `Cmd+L`）：选中代码后按键即可从键盘完成同样操作。
+- **拖拽**：从资源管理器拖文件/文件夹到聊天输入框。**拖拽时需按住 `Shift`**（VS Code 1.91+ 对 webview 的要求）。图片会以附件形式加入。
+
+### 安装预打包 VSIX
+
+从本仓库下载 `dist/reasonix-vscode.vsix`，然后执行：
+
+```sh
+code --install-extension dist/reasonix-vscode.vsix --force
+```
+
+并运行 `Developer: Reload Window`（开发者：重新加载窗口）。打包版本固定为 `99.0.0`，Marketplace 自动更新永远不会覆盖此版本。
+
+### 跟随上游更新
+
+仓库自带 PowerShell 脚本会拉取官方最新 `main`、把本 fork 的改动 rebase 上去、运行 lint/测试并重新打包 VSIX（需要 Node.js）：
+
+```powershell
+# 在仓库根目录执行（upstream = 官方仓库，origin = 你的 fork）：
+.\update-reasonix-fork.ps1
+```
+
+若 rebase 冲突，解决后执行 `git rebase --continue`，再重跑脚本即可。
+
 ## 功能亮点
 
 - VS Code Activity Bar 聊天视图，由本地 `reasonix acp` 进程驱动。

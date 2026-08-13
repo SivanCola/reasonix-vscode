@@ -17,6 +17,61 @@ const maxTotalBytes = 120_000;
 const maxDirectoryEntries = 80;
 const maxTokenLength = 240;
 
+/**
+ * Characters that would break the @ mention token grammar used by
+ * extractMentionTokens: whitespace plus the token exclusion set, and "%"
+ * (a raw percent could corrupt decodeURIComponent in normalizeMentionPath).
+ */
+const MENTION_TOKEN_BREAKERS = /[\s"')\]}>;,:]|%/;
+
+/**
+ * Builds a readable @ mention token for a workspace-relative path. Paths
+ * containing characters that would break the mention token grammar
+ * (whitespace, quotes, brackets, "%") are wrapped in double (or single)
+ * quotes so they stay fully human-readable in the composer. Percent
+ * encoding is only a last resort for paths containing every quote style.
+ * The workspace root itself and extensionless root-level files get a
+ * "./" prefix so the resolver accepts them.
+ */
+export function mentionTokenForPath(relativePath: string, isDirectory: boolean): string {
+  if (relativePath === "") {
+    return "./"; // workspace root directory listing
+  }
+  const base = relativePath.includes("/") || relativePath.includes(".") ? relativePath : `./${relativePath}`;
+  const path = isDirectory ? `${base}/` : base;
+  if (!MENTION_TOKEN_BREAKERS.test(path)) {
+    return path;
+  }
+  if (path.includes("%")) {
+    return percentEncodeToken(path);
+  }
+  if (!path.includes('"')) {
+    return `"${path}"`;
+  }
+  if (!path.includes("'")) {
+    return `'${path}'`;
+  }
+  return percentEncodeToken(path);
+}
+
+function percentEncodeToken(path: string): string {
+  return path
+    .split("")
+    .map((ch) => (MENTION_TOKEN_BREAKERS.test(ch) ? percentEncodeChar(ch) : ch))
+    .join("");
+}
+
+/**
+ * Percent-encodes a single character at the byte level. encodeURIComponent
+ * is not used because it leaves URI reserved characters such as ' ( ) that
+ * still break the mention token grammar.
+ */
+function percentEncodeChar(ch: string): string {
+  return Array.from(new TextEncoder().encode(ch))
+    .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`)
+    .join("");
+}
+
 export async function buildPromptBlocks(prompt: string, workspacePath: string): Promise<{ blocks: ContentBlock[]; mentions: FileMention[] }> {
   const mentions = await resolveFileMentions(prompt, workspacePath);
   const resources: ContentBlock[] = mentions.map((mention) => ({
@@ -103,10 +158,12 @@ export async function resolveFileMentions(prompt: string, workspacePath: string)
 
 function extractMentionTokens(prompt: string): string[] {
   const tokens: string[] = [];
-  const pattern = /(^|[\s([{])@([^\s)\]}>,;:"']+)/g;
+  const pattern = /(^|[\s([{])@(?:"([^"\n]{1,240})"|'([^'\n]{1,240})'|([^\s)\]}>,;:"']+))/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(prompt)) !== null) {
-    const token = stripTrailingPunctuation(match[2] ?? "");
+    const quoted = match[2] ?? match[3];
+    const raw = quoted ?? match[4] ?? "";
+    const token = quoted ? raw : stripTrailingPunctuation(raw);
     if (token.length > 0 && token.length <= maxTokenLength) {
       tokens.push(token);
     }
@@ -126,7 +183,11 @@ function normalizeMentionPath(token: string): string | undefined {
   }
   const normalized = path.normalize(decoded).replace(/\\/g, "/");
   const canonical = normalized.replace(/\/+$/g, "");
-  if (canonical === "." || canonical.startsWith("../") || canonical === "..") {
+  if (canonical === ".") {
+    // The workspace root itself: listing it is useful for drag/drop and explorer additions.
+    return "";
+  }
+  if (canonical.startsWith("../") || canonical === "..") {
     return undefined;
   }
   if (!looksLikePath(decoded) && !looksLikePath(canonical)) {

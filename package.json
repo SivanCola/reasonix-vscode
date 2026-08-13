@@ -25,19 +25,6 @@
     "AI",
     "Other"
   ],
-  "activationEvents": [
-    "onView:reasonix.chat",
-    "onCommand:reasonix.openChat",
-    "onCommand:reasonix.newSession",
-    "onCommand:reasonix.sendSelection",
-    "onCommand:reasonix.cancelTurn",
-    "onCommand:reasonix.pickModel",
-    "onCommand:reasonix.pickEffort",
-    "onCommand:reasonix.pickUiLanguage",
-    "onCommand:reasonix.selectBinary",
-    "onCommand:reasonix.openSettings",
-    "onCommand:reasonix.showOutput"
-  ],
   "main": "./dist/extension.js",
   "files": [
     "dist/extension.js",
@@ -69,6 +56,11 @@
       {
         "command": "reasonix.sendSelection",
         "title": "Reasonix: Send Selection",
+        "category": "Reasonix"
+      },
+      {
+        "command": "reasonix.addToChat",
+        "title": "Reasonix: Add to Chat",
         "category": "Reasonix"
       },
       {
@@ -154,6 +146,16 @@
           ],
           "default": "selectionOnly",
           "description": "Controls how the active editor selection or cursor window is appended to prompts."
+        },
+        "reasonix.cnyPerUsd": {
+          "type": "number",
+          "default": 7.2,
+          "description": "USD to CNY conversion rate used to display usage costs in RMB (fallback when automatic refresh is disabled or fails)."
+        },
+        "reasonix.cnyPerUsdAuto": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refresh the USD to CNY rate automatically on startup (once per day) from a free exchange-rate API."
         }
       }
     },
@@ -163,6 +165,17 @@
           "command": "reasonix.sendSelection",
           "when": "editorTextFocus",
           "group": "navigation@90"
+        },
+        {
+          "command": "reasonix.addToChat",
+          "when": "editorTextFocus",
+          "group": "navigation@91"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "reasonix.addToChat",
+          "group": "navigation@91"
         }
       ],
       "commandPalette": [
@@ -174,6 +187,9 @@
         },
         {
           "command": "reasonix.sendSelection"
+        },
+        {
+          "command": "reasonix.addToChat"
         },
         {
           "command": "reasonix.cancelTurn"
@@ -212,10 +228,19 @@
         {
           "id": "reasonix.chat",
           "name": "Chat",
-          "type": "webview"
+          "type": "webview",
+          "icon": "media/icon.svg"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "reasonix.addToChat",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ]
   },
   "scripts": {
     "build": "npm run compile",

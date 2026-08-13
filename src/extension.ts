@@ -29,7 +29,7 @@ import { buildEditorContextBlock, configuredSelectionMode, type IncludeSelection
 import { WorkspaceFileBridge } from "./fileBridge";
 import { DiffPreviewProvider } from "./preview";
 import { normalizeReasonixPath, selectReasonixPath } from "./reasonixLauncher";
-import { buildPromptBlocks } from "./resourceMentions";
+import { buildPromptBlocks, mentionTokenForPath } from "./resourceMentions";
 import { suggestWorkspaceResources } from "./resourceSuggestions";
 import { redactLocalPaths } from "./sanitize";
 import { expandSlashCommand } from "./slashCommands";
@@ -84,6 +84,7 @@ type ChatSnapshot = WorkspaceChatState & {
   uiLanguage: UiLanguage;
   settings: ReasonixSettings;
   sessions: SessionSummary[];
+  cnyPerUsd: number;
 };
 
 type ChatViewState = Omit<ChatSnapshot, "items">;
@@ -149,6 +150,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("reasonix.newSession", () => provider.newSession()),
     vscode.commands.registerCommand("reasonix.sendSelection", () => provider.sendSelection()),
+    vscode.commands.registerCommand("reasonix.addToChat", (arg?: vscode.Uri | { uri?: vscode.Uri }) => {
+      void provider.addToChat(arg instanceof vscode.Uri ? arg : arg?.uri);
+    }),
     vscode.commands.registerCommand("reasonix.cancelTurn", () => provider.cancelTurn()),
     vscode.commands.registerCommand("reasonix.pickModel", () => provider.pickModel()),
     vscode.commands.registerCommand("reasonix.pickEffort", () => provider.pickEffort()),
@@ -164,7 +168,9 @@ export function activate(context: vscode.ExtensionContext): void {
         event.affectsConfiguration("reasonix.model") ||
         event.affectsConfiguration("reasonix.binaryPath") ||
         event.affectsConfiguration("reasonix.autoStart") ||
-        event.affectsConfiguration("reasonix.trace")
+        event.affectsConfiguration("reasonix.trace") ||
+        event.affectsConfiguration("reasonix.cnyPerUsd") ||
+        event.affectsConfiguration("reasonix.cnyPerUsdAuto")
       ) {
         provider.refreshActiveWorkspace();
       }
@@ -184,6 +190,10 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand("reasonix.test.snapshot", () => provider.testSnapshot()),
     );
   }
+  // Refresh the USD→CNY rate once per day on startup (no network in tests).
+  if (process.env.REASONIX_TEST_COMMANDS !== "1") {
+    void refreshCnyRate(context, output).then(() => provider.refreshActiveWorkspace());
+  }
   provider.refreshActiveWorkspace();
 }
 
@@ -201,6 +211,10 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
   private readonly snapshotSync = new SnapshotSync<ChatItem>();
   private snapshotTimer?: NodeJS.Timeout;
   private snapshotWorkspaceKey?: string;
+  private pendingMentions: { id: number; attachments: PendingAttachment[]; offset?: number }[] = [];
+  private nextMentionId = 1;
+  private lastMentionAttemptAt = 0;
+  private mentionFlushTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -225,6 +239,10 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
     if (this.snapshotTimer) {
       clearTimeout(this.snapshotTimer);
       this.snapshotTimer = undefined;
+    }
+    if (this.mentionFlushTimer) {
+      clearTimeout(this.mentionFlushTimer);
+      this.mentionFlushTimer = undefined;
     }
   }
 
@@ -270,6 +288,16 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
 
   refreshActiveWorkspace(): void {
     this.postSnapshot();
+  }
+
+  /** Prefers today's auto-refreshed rate, falling back to the setting. */
+  private cnyPerUsd(): number {
+    const value = this.context.globalState.get<number>(CNY_RATE_STORAGE_KEY);
+    const date = this.context.globalState.get<string>(CNY_RATE_DATE_KEY);
+    if (date === todayKey() && typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return value;
+    }
+    return configuredCnyPerUsd();
   }
 
   async newSession(): Promise<void> {
@@ -325,6 +353,182 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
       return;
     }
     await this.sendPrompt("Use the current VS Code editor context.", "nearby");
+  }
+
+  /**
+   * Adds a file or directory (optionally with the current editor selection) to
+   * the Reasonix composer as a workspace-relative @ mention, inserted at the
+   * caret. Files outside the workspace are attached by content instead.
+   */
+  async addToChat(uri?: vscode.Uri): Promise<void> {
+    const resolved = uri ?? vscode.window.activeTextEditor?.document.uri;
+    if (!resolved || !isFileResourceUri(resolved)) {
+      void vscode.window.showInformationMessage("Add to Reasonix Chat works with workspace files and folders.");
+      return;
+    }
+    let stat: vscode.FileStat;
+    try {
+      stat = await vscode.workspace.fs.stat(resolved);
+    } catch {
+      void vscode.window.showInformationMessage("Add to Reasonix Chat could not access the selected resource.");
+      return;
+    }
+    const folder = vscode.workspace.getWorkspaceFolder(resolved) ?? this.currentWorkspaceFolder();
+    const relative = folder ? path.relative(folder.uri.fsPath, resolved.fsPath).replace(/\\/g, "/") : undefined;
+    const insideWorkspace = relative !== undefined && (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)));
+
+    await vscode.commands.executeCommand("workbench.view.extension.reasonix");
+
+    if (stat.type === vscode.FileType.Directory) {
+      if (!insideWorkspace) {
+        void vscode.window.showInformationMessage("Directories can only be referenced inside the workspace.");
+        return;
+      }
+      this.queueMentions([{
+        kind: "mention",
+        name: relative === "" ? "./" : `${path.posix.basename(relative)}/`,
+        relativePath: relative,
+        uri: resolved.toString(),
+        isDirectory: true,
+      }]);
+      return;
+    }
+
+    const editor = vscode.window.activeTextEditor;
+    const selection = editor && !editor.selection.isEmpty && editor.document.uri.fsPath === resolved.fsPath
+      ? {
+        text: editor.document.getText(editor.selection),
+        startLine: editor.selection.start.line + 1,
+        endLine: editor.selection.end.line + 1,
+        languageId: editor.document.languageId,
+      }
+      : undefined;
+
+    if (!insideWorkspace) {
+      // Outside the workspace @ mentions cannot resolve, so attach the content instead.
+      this.queueMentions([{
+        kind: "file",
+        name: path.basename(resolved.fsPath),
+        uri: resolved.fsPath,
+        mimeType: mimeFromFileName(resolved.fsPath),
+      }]);
+      return;
+    }
+
+    if (!selection) {
+      this.queueMentions([{
+        kind: "mention",
+        name: path.posix.basename(relative),
+        relativePath: relative,
+        uri: resolved.toString(),
+      }]);
+      return;
+    }
+    this.queueMentions([{
+      kind: "mention",
+      name: `${path.posix.basename(relative)} L${selection.startLine}-${selection.endLine}`,
+      relativePath: relative,
+      uri: resolved.toString(),
+      text: selection.text,
+      startLine: selection.startLine,
+      endLine: selection.endLine,
+      languageId: selection.languageId,
+    }]);
+  }
+
+  /**
+   * Handles file/folder URIs dropped onto the webview. Directories and text
+   * files become mention chips; images are attached by content.
+   */
+  private async handleFileDrop(uris: string[], offset?: number): Promise<void> {
+    const folder = this.currentWorkspaceFolder();
+    const pending: PendingAttachment[] = [];
+    for (const raw of uris) {
+      let uri: vscode.Uri;
+      try {
+        uri = vscode.Uri.parse(raw, true);
+      } catch {
+        continue;
+      }
+      if (!isFileResourceUri(uri)) {
+        continue;
+      }
+      let stat: vscode.FileStat;
+      try {
+        stat = await vscode.workspace.fs.stat(uri);
+      } catch {
+        continue;
+      }
+      const relative = folder ? path.relative(folder.uri.fsPath, uri.fsPath).replace(/\\/g, "/") : undefined;
+      const insideWorkspace = relative !== undefined && (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)));
+      if (stat.type === vscode.FileType.Directory) {
+        if (insideWorkspace) {
+          pending.push({
+            kind: "mention",
+            name: relative === "" ? "./" : `${path.posix.basename(relative)}/`,
+            relativePath: relative,
+            uri: uri.toString(),
+            isDirectory: true,
+          });
+        }
+        continue;
+      }
+      if (isImageMime(mimeFromFileName(uri.fsPath))) {
+        pending.push({ kind: "image", name: path.basename(uri.fsPath), uri: uri.fsPath, mimeType: mimeFromFileName(uri.fsPath) });
+        continue;
+      }
+      if (insideWorkspace) {
+        pending.push({
+          kind: "mention",
+          name: path.posix.basename(relative),
+          relativePath: relative,
+          uri: uri.toString(),
+        });
+      } else {
+        pending.push({ kind: "file", name: path.basename(uri.fsPath), uri: uri.fsPath, mimeType: mimeFromFileName(uri.fsPath) });
+      }
+    }
+    if (pending.length > 0) {
+      this.queueMentions(pending, offset);
+    }
+  }
+
+  /**
+   * Adds mention/attachment chips to the composer. Each batch is queued and
+   * acknowledged independently (mentionsApplied), so rapid successive
+   * additions never overwrite a pending batch; the webview dedupes by key.
+   */
+  private queueMentions(attachments: PendingAttachment[], offset?: number): void {
+    this.pendingMentions.push({ id: this.nextMentionId, attachments, offset });
+    this.nextMentionId += 1;
+    this.flushPendingMentions();
+  }
+
+  private flushPendingMentions(): void {
+    if (!this.view || this.pendingMentions.length === 0) {
+      return;
+    }
+    // Debounce so ack/snapshot bursts cannot retransmit endlessly; a timer
+    // retries once the window passes.
+    const now = Date.now();
+    if (now - this.lastMentionAttemptAt < 300) {
+      if (this.mentionFlushTimer === undefined) {
+        this.mentionFlushTimer = setTimeout(() => {
+          this.mentionFlushTimer = undefined;
+          this.flushPendingMentions();
+        }, 300);
+      }
+      return;
+    }
+    this.lastMentionAttemptAt = now;
+    for (const pending of this.pendingMentions) {
+      void this.view.webview.postMessage({
+        type: "mentionsPicked",
+        id: pending.id,
+        attachments: pending.attachments,
+        ...(pending.offset !== undefined ? { offset: pending.offset } : {}),
+      });
+    }
   }
 
   cancelTurn(): void {
@@ -703,6 +907,12 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
       return;
     }
     switch (message.command) {
+      case "fileDrop":
+        await this.handleFileDrop(message.uris, message.offset);
+        return;
+      case "mentionsApplied":
+        this.pendingMentions = this.pendingMentions.filter((pending) => pending.id !== message.id);
+        return;
       case "sendPrompt":
         const activeFolder = this.currentWorkspaceFolder();
         const nativeCommand = activeFolder
@@ -808,6 +1018,9 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
         await this.postResourceSuggestions(message.requestId, message.query);
         return;
       case "stateSnapshot":
+        // The webview just became ready (initial load or visibility change);
+        // retry any mention chips that were queued before it could receive messages.
+        this.flushPendingMentions();
         this.snapshotSync.requireFullSnapshot();
         this.postSnapshot(undefined, true);
         return;
@@ -1173,13 +1386,25 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
         this.sessionModeId(state, "goal") !== undefined,
         this.workModeOption(state) !== undefined,
       );
-      const withMentions = await buildPromptBlocks(providerPrompt, folder.uri.fsPath);
-      let blocks: ContentBlock[] | undefined = withMentions.blocks;
-      if (attachments.length > 0) {
+      const mentionAttachments = attachments.filter((attachment) => attachment.kind === "mention");
+      const plainAttachments = attachments.filter((attachment) => attachment.kind !== "mention");
+      const selectionBlocks: ContentBlock[] = [];
+      const mentionTokens: string[] = [];
+      for (const mention of mentionAttachments) {
+        if (mention.text !== undefined) {
+          selectionBlocks.push(selectionMentionBlock(mention, folder));
+        } else if (mention.relativePath !== undefined) {
+          mentionTokens.push(`@${mentionTokenForPath(mention.relativePath, mention.isDirectory === true)}`);
+        }
+      }
+      const mentionSuffix = mentionTokens.length > 0 ? `\n${mentionTokens.join(" ")}` : "";
+      const withMentions = await buildPromptBlocks(`${providerPrompt}${mentionSuffix}`, folder.uri.fsPath);
+      let blocks: ContentBlock[] | undefined = [...withMentions.blocks, ...selectionBlocks];
+      if (plainAttachments.length > 0) {
         try {
           const readFile = async (uri: string) => vscode.workspace.fs.readFile(vscode.Uri.parse(uri));
           const attachmentBlocks: ContentBlock[] = [];
-          for (const attachment of attachments.slice(0, MAX_ATTACHMENTS)) {
+          for (const attachment of plainAttachments.slice(0, MAX_ATTACHMENTS)) {
             attachmentBlocks.push(await attachmentToBlock(attachment, readFile));
           }
           blocks = [...blocks, ...attachmentBlocks];
@@ -1752,6 +1977,7 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
       uiLanguage: configuredUiLanguage(),
       settings: currentSettings(),
       sessions: folder ? (state.sessions ?? this.sessionHistory(folder)) : [],
+      cnyPerUsd: this.cnyPerUsd(),
     };
     const { items, ...viewState } = snapshot;
     this.updateStatusBar(folder);
@@ -2033,9 +2259,8 @@ class ReasonixChatProvider implements vscode.WebviewViewProvider, vscode.Disposa
           <button id="connectionSettings" class="connection-notice__action" type="button" hidden>Settings</button>
         </div>
       </div>
-      <div id="attachmentTray" class="attachment-tray" aria-live="polite" hidden></div>
       <div class="input-wrap">
-        <textarea id="prompt" rows="2" placeholder="Type your task here..."></textarea>
+        <div id="prompt" class="prompt prompt-empty" contenteditable="plaintext-only" role="textbox" aria-multiline="true" data-placeholder="Type your task here..."></div>
         <div id="composerHint" class="composer-hint">Type @ for context, / for slash command...</div>
         <div id="suggestionMenu" class="suggestion-menu" role="listbox" hidden></div>
         <button id="send" class="send-button" type="submit" aria-label="Send">↑</button>
@@ -2258,6 +2483,28 @@ function workspaceKey(folder: vscode.WorkspaceFolder): string {
   return folder.uri.toString();
 }
 
+/** File-backed resources, including remote workspaces (vscode-remote scheme). */
+function isFileResourceUri(uri: vscode.Uri): boolean {
+  return uri.scheme === "file" || uri.scheme === "vscode-remote";
+}
+
+/** Builds a resource block for a mention that carries a code selection. */
+function selectionMentionBlock(mention: PendingAttachment, folder: vscode.WorkspaceFolder): ContentBlock {
+  const relative = mention.relativePath ?? mention.name;
+  const startLine = mention.startLine;
+  const endLine = mention.endLine ?? startLine;
+  const range = startLine !== undefined && endLine !== undefined ? ` lines ${startLine}-${endLine}` : "";
+  const baseUri = mention.uri ?? vscode.Uri.joinPath(folder.uri, relative).toString();
+  return {
+    type: "resource",
+    resource: {
+      uri: startLine !== undefined ? `${baseUri}#L${startLine}-L${endLine}` : baseUri,
+      mimeType: "text/plain",
+      text: `VS Code selection: ${relative}${range}\nLanguage: ${mention.languageId ?? ""}\n${mention.text ?? ""}`,
+    },
+  };
+}
+
 function emptyState(): WorkspaceChatState {
   return { items: [], running: false, disconnected: true, status: "Disconnected", mcp: { connected: [], configured: [], disconnected: [] } };
 }
@@ -2278,6 +2525,57 @@ function currentSettings(): ReasonixSettings {
 function configuredUiLanguage(): UiLanguage {
   const value = vscode.workspace.getConfiguration("reasonix").get<string>("uiLanguage", "auto");
   return value === "en" || value === "zh-CN" || value === "auto" ? value : "auto";
+}
+
+/** USD→CNY conversion rate for cost display (configurable). */
+function configuredCnyPerUsd(): number {
+  const value = vscode.workspace.getConfiguration("reasonix").get<number>("cnyPerUsd", 7.2);
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 7.2;
+}
+
+const CNY_RATE_API_URL = "https://open.er-api.com/v6/latest/USD";
+const CNY_RATE_STORAGE_KEY = "reasonix.cnyRate.value";
+const CNY_RATE_DATE_KEY = "reasonix.cnyRate.date";
+
+function todayKey(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+/**
+ * Fetches the current USD→CNY rate once per day and stores it in globalState.
+ * Failures are logged and the configured fallback rate keeps being used.
+ */
+async function refreshCnyRate(context: vscode.ExtensionContext, output: vscode.OutputChannel): Promise<void> {
+  const enabled = vscode.workspace.getConfiguration("reasonix").get<boolean>("cnyPerUsdAuto", true);
+  if (!enabled) {
+    return;
+  }
+  const today = todayKey();
+  if (context.globalState.get<string>(CNY_RATE_DATE_KEY) === today) {
+    return; // Already refreshed today.
+  }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8_000);
+    const response = await fetch(CNY_RATE_API_URL, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload = (await response.json()) as { rates?: { CNY?: unknown } };
+    const rate = payload?.rates?.CNY;
+    if (typeof rate !== "number" || !Number.isFinite(rate) || rate < 3 || rate > 20) {
+      throw new Error(`unexpected rate: ${String(rate)}`);
+    }
+    await context.globalState.update(CNY_RATE_STORAGE_KEY, rate);
+    await context.globalState.update(CNY_RATE_DATE_KEY, today);
+    output.appendLine(`USD→CNY rate updated to ${rate} (valid for ${today})`);
+  } catch (err) {
+    output.appendLine(`USD→CNY rate refresh failed (using configured fallback): ${errorMessage(err)}`);
+  }
 }
 
 function effectiveUiLocale(): string {

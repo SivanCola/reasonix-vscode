@@ -5,11 +5,19 @@ export const MAX_ATTACHMENT_TEXT_BYTES = 40_000;
 export const MAX_ATTACHMENT_IMAGE_BYTES = 2_000_000;
 
 export interface PendingAttachment {
-  kind: "file" | "image" | "session";
+  kind: "file" | "image" | "session" | "mention";
   name: string;
   uri?: string;
   mimeType?: string;
   sessionId?: string;
+  /** mention-only: workspace-relative path (or the file name for external files) */
+  relativePath?: string;
+  /** mention-only: selected code, if the mention is a code selection */
+  text?: string;
+  startLine?: number;
+  endLine?: number;
+  languageId?: string;
+  isDirectory?: boolean;
 }
 
 export type ReadFileBytes = (uri: string) => Promise<Uint8Array>;
@@ -37,12 +45,15 @@ export function isPendingAttachment(value: unknown): value is PendingAttachment 
     return false;
   }
   const candidate = value as Record<string, unknown>;
-  const kindOk = candidate.kind === "file" || candidate.kind === "image" || candidate.kind === "session";
+  const kindOk = candidate.kind === "file" || candidate.kind === "image" || candidate.kind === "session" || candidate.kind === "mention";
   if (!kindOk || typeof candidate.name !== "string" || candidate.name.length === 0) {
     return false;
   }
   if (candidate.kind === "session") {
     return typeof candidate.sessionId === "string" && candidate.sessionId.length > 0;
+  }
+  if (candidate.kind === "mention") {
+    return typeof candidate.relativePath === "string" && candidate.relativePath.length > 0;
   }
   return typeof candidate.uri === "string" && candidate.uri.length > 0;
 }
@@ -71,6 +82,22 @@ export async function attachmentToBlock(
         uri: `session://${attachment.sessionId}`,
         mimeType: "text/plain",
         text: `Referenced session: ${attachment.name} (session ${attachment.sessionId})`
+      }
+    };
+  }
+
+  if (attachment.kind === "mention") {
+    // Mentions are expanded by the host before sending; reaching this
+    // branch means a mention slipped through, so include a safe summary.
+    const range = attachment.startLine !== undefined && attachment.endLine !== undefined
+      ? ` lines ${attachment.startLine}-${attachment.endLine}`
+      : "";
+    return {
+      type: "resource",
+      resource: {
+        uri: attachment.uri ?? `file:///${attachment.relativePath ?? attachment.name}`,
+        mimeType: "text/plain",
+        text: `Referenced ${attachment.isDirectory ? "directory" : "file"}: ${attachment.relativePath ?? attachment.name}${range}`
       }
     };
   }

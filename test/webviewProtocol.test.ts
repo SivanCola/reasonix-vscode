@@ -62,6 +62,42 @@ test("parseWebviewMessage accepts approval decisions with stable ids", () => {
   });
 });
 
+test("parseWebviewMessage accepts valid file drops", () => {
+  assert.deepEqual(parseWebviewMessage({ command: "fileDrop", uris: ["file:///E:/src/a.ts"] }), {
+    command: "fileDrop",
+    uris: ["file:///E:/src/a.ts"],
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "fileDrop", uris: ["vscode-remote://ssh-remote+host/home/user/a.ts"] }), {
+    command: "fileDrop",
+    uris: ["vscode-remote://ssh-remote+host/home/user/a.ts"],
+  });
+  assert.deepEqual(parseWebviewMessage({ command: "fileDrop", uris: ["file:///E:/src/a.ts"], offset: 7 }), {
+    command: "fileDrop",
+    uris: ["file:///E:/src/a.ts"],
+    offset: 7,
+  });
+  assert.equal(parseWebviewMessage({ command: "fileDrop", uris: ["file:///E:/src/a.ts"], offset: -1 }), undefined);
+  assert.equal(parseWebviewMessage({ command: "fileDrop", uris: ["file:///E:/src/a.ts"], offset: 2.5 }), undefined);
+});
+
+test("parseWebviewMessage rejects malformed file drops", () => {
+  assert.equal(parseWebviewMessage({ command: "fileDrop", uris: [] }), undefined);
+  assert.equal(parseWebviewMessage({ command: "fileDrop", uris: ["http://evil/x"] }), undefined);
+  assert.equal(parseWebviewMessage({ command: "fileDrop", uris: [42] }), undefined);
+  assert.equal(parseWebviewMessage({ command: "fileDrop", uris: Array.from({ length: 6 }, (_, i) => `file:///e:/f${i}.ts`) }), undefined);
+  assert.equal(parseWebviewMessage({ command: "fileDrop", uris: [`file:///e:/${"x".repeat(5000)}.ts`] }), undefined);
+  assert.equal(parseWebviewMessage({ command: "fileDrop" }), undefined);
+});
+
+test("parseWebviewMessage accepts mentionsApplied acks", () => {
+  assert.deepEqual(parseWebviewMessage({ command: "mentionsApplied", id: 3 }), {
+    command: "mentionsApplied",
+    id: 3,
+  });
+  assert.equal(parseWebviewMessage({ command: "mentionsApplied", id: -1 }), undefined);
+  assert.equal(parseWebviewMessage({ command: "mentionsApplied" }), undefined);
+});
+
 test("parseWebviewMessage accepts product UI commands", () => {
   assert.deepEqual(parseWebviewMessage({ command: "connect" }), {
     command: "connect",

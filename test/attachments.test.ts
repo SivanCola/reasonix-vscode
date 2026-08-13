@@ -24,6 +24,10 @@ test("isPendingAttachment validates shape per kind", () => {
   assert.equal(isPendingAttachment({ kind: "file", name: "a.ts", uri: "file:///a.ts" }), true);
   assert.equal(isPendingAttachment({ kind: "image", name: "a.png", uri: "file:///a.png", mimeType: "image/png" }), true);
   assert.equal(isPendingAttachment({ kind: "session", name: "Fix bug", sessionId: "s-1" }), true);
+  assert.equal(isPendingAttachment({ kind: "mention", name: "a.ts", relativePath: "src/a.ts" }), true);
+  assert.equal(isPendingAttachment({ kind: "mention", name: "a.ts L3-12", relativePath: "src/a.ts", text: "code", startLine: 3, endLine: 12, languageId: "typescript" }), true);
+  assert.equal(isPendingAttachment({ kind: "mention", name: "src/", relativePath: "src", isDirectory: true }), true);
+  assert.equal(isPendingAttachment({ kind: "mention", name: "a.ts" }), false);
   assert.equal(isPendingAttachment({ kind: "file", name: "a.ts" }), false);
   assert.equal(isPendingAttachment({ kind: "session", name: "Fix bug" }), false);
   assert.equal(isPendingAttachment({ kind: "folder", name: "src", uri: "file:///src" }), false);

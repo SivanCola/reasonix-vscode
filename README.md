@@ -12,6 +12,35 @@ This repository is the standalone VS Code extension package. It does not include
 
 The extension does not bundle a Reasonix binary. It uses `reasonix.binaryPath` when configured, then falls back to resolving `reasonix` from `PATH`.
 
+## Custom build: Add to Chat, Ctrl+L, and drag & drop
+
+This fork adds three composer conveniences on top of the upstream extension:
+
+- **Right-click → "Reasonix: Add to Chat"** on a file/folder in the Explorer (or in the editor) inserts a workspace-relative `@` mention at the composer caret. Selected code in the editor is inserted together with its file reference.
+- **Ctrl+L** (`Cmd+L` on macOS) with text selected does the same from the keyboard.
+- **Drag & drop** files or folders from the Explorer into the chat input. **Hold `Shift` while dragging** (a VS Code 1.91+ requirement for webviews). Images become attachments.
+
+### Install the prebuilt VSIX
+
+Download `dist/reasonix-vscode.vsix` from this repository, then:
+
+```sh
+code --install-extension dist/reasonix-vscode.vsix --force
+```
+
+and run `Developer: Reload Window`. The package is versioned `99.0.0` so Marketplace auto-updates will never overwrite this build.
+
+### Update with upstream changes
+
+The bundled PowerShell script fetches the latest upstream `main`, rebases these changes, runs lint/tests, and repackages the VSIX (requires Node.js):
+
+```powershell
+# From the repository root (upstream = official repo, origin = your fork):
+.\update-reasonix-fork.ps1
+```
+
+On a rebase conflict, resolve it (`git rebase --continue`) and re-run the script.
+
 ## Highlights
 
 - Chat view in the VS Code Activity Bar, backed by the local `reasonix acp` process.

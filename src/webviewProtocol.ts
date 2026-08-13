@@ -40,6 +40,8 @@ export type WebviewToHostMessage =
   | { command: "openToolLocation"; index: number; locationIndex: number }
   | { command: "approvalDecision"; id: string; optionId: string }
   | { command: "resourceSuggestions"; requestId: number; query: string }
+  | { command: "fileDrop"; uris: string[]; offset?: number }
+  | { command: "mentionsApplied"; id: number }
   | { command: "stateSnapshot" };
 
 type SettingKey = "binaryPath" | "model" | "uiLanguage" | "autoStart" | "trace" | "includeSelectionMode";
@@ -57,6 +59,7 @@ export type HostToWebviewMessage =
     }
   | { type: "resourceSuggestions"; requestId: number; query: string; items: ResourceSuggestion[] }
   | { type: "attachmentsPicked"; attachments: PendingAttachment[] }
+  | { type: "mentionsPicked"; id: number; attachments: PendingAttachment[]; offset?: number }
   | { type: "openSettings" };
 
 export function parseWebviewMessage(value: unknown): WebviewToHostMessage | undefined {
@@ -144,9 +147,40 @@ export function parseWebviewMessage(value: unknown): WebviewToHostMessage | unde
       return isValidIndex(value.requestId) && typeof value.query === "string" && value.query.length <= 240
         ? { command: "resourceSuggestions", requestId: value.requestId, query: value.query }
         : undefined;
+    case "fileDrop": {
+      const message = parseFileDropUris(value.uris);
+      if (!message) {
+        return undefined;
+      }
+      const offset = value.offset;
+      if (offset !== undefined && offset !== null) {
+        if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > 200_000) {
+          return undefined;
+        }
+        message.offset = offset;
+      }
+      return message;
+    }
+    case "mentionsApplied":
+      return isValidIndex(value.id) ? { command: "mentionsApplied", id: value.id } : undefined;
     default:
       return undefined;
   }
+}
+
+export const MAX_FILE_DROP_URIS = 5;
+const MAX_DROP_URI_LENGTH = 4096;
+
+function parseFileDropUris(value: unknown): Extract<WebviewToHostMessage, { command: "fileDrop" }> | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_FILE_DROP_URIS) {
+    return undefined;
+  }
+  const uris = value.filter((item): item is string =>
+    typeof item === "string"
+    && (item.startsWith("file:") || item.startsWith("vscode-remote:"))
+    && item.length <= MAX_DROP_URI_LENGTH
+  );
+  return uris.length === value.length ? { command: "fileDrop", uris } : undefined;
 }
 
 function isRuntimeOptionValue(value: unknown): value is string {

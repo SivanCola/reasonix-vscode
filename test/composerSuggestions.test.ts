@@ -49,6 +49,13 @@ test("replaceComposerTrigger inserts slash commands and resource mentions", () =
     value: "check @src/webview.ts ",
     cursor: 22,
   });
+
+  const spaced = getComposerTrigger("check @sr", 9);
+  assert.ok(spaced);
+  assert.deepEqual(replaceComposerTrigger("check @sr", spaced, "src/my file.txt"), {
+    value: "check @\"src/my file.txt\" ",
+    cursor: 25,
+  });
 });
 
 test("slashSuggestions filters commands and localizes details", () => {

@@ -90,7 +90,7 @@ body {
 
 button,
 input,
-textarea {
+#prompt {
   font: inherit;
 }
 
@@ -671,7 +671,7 @@ pre {
   display: grid;
 }
 
-textarea {
+#prompt {
   width: 100%;
   min-height: 74px;
   max-height: 180px;
@@ -685,7 +685,7 @@ textarea {
   line-height: 1.4;
 }
 
-textarea:focus {
+#prompt:focus {
   border-color: var(--vscode-focusBorder);
 }
 
@@ -1095,7 +1095,7 @@ button:disabled {
   position: relative;
 }
 
-textarea {
+#prompt {
   min-height: 96px;
   max-height: 210px;
   padding: 14px 44px 44px 12px;
@@ -1117,7 +1117,7 @@ textarea {
   pointer-events: none;
 }
 
-textarea:not(:placeholder-shown) + .composer-hint {
+#prompt:not(.prompt-empty) + .composer-hint {
   opacity: 0.45;
 }
 
@@ -1392,7 +1392,7 @@ pre {
 }
 
 .input-wrap::before {
-  content: "â€º";
+  content: "â€?;
   position: absolute;
   left: 12px;
   top: 17px;
@@ -1402,7 +1402,7 @@ pre {
   font-weight: 800;
 }
 
-textarea {
+#prompt {
   min-height: 78px;
   padding: 14px 48px 38px 30px;
   background: transparent;
@@ -1410,7 +1410,7 @@ textarea {
   border-radius: 9px 9px 0 0;
 }
 
-textarea:focus {
+#prompt:focus {
   border-color: transparent;
 }
 
@@ -1927,7 +1927,7 @@ textarea:focus {
     padding-left: 8px;
   }
 
-  textarea {
+  #prompt {
     padding-right: 44px;
     padding-left: 28px;
   }
@@ -1998,7 +1998,7 @@ textarea:focus {
     max-width: 56px;
   }
 
-  textarea {
+  #prompt {
     min-height: 66px;
     padding-top: 10px;
     padding-bottom: 30px;
@@ -2925,3 +2925,45 @@ textarea:focus {
   color: var(--vscode-foreground);
   outline: none;
 }
+
+/* Composer as a contenteditable editor (replaces the textarea) */
+#prompt {
+  display: block;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  outline: none;
+  resize: none;
+  box-sizing: border-box;
+}
+#prompt:empty::before,
+#prompt.prompt-empty::before {
+  content: attr(data-placeholder);
+  color: var(--vscode-input-placeholderForeground);
+  pointer-events: none;
+}
+/* Inline mention / attachment chips inside the composer */
+.mention-chip {
+  display: inline-block;
+  margin: 0 3px;
+  padding: 2px 8px;
+  border: 1px solid var(--vscode-inputValidation-infoBorder, var(--vscode-focusBorder));
+  border-radius: 10px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  font-size: 0.9em;
+  line-height: 1.4;
+  cursor: default;
+  user-select: none;
+  vertical-align: baseline;
+  white-space: normal;
+}
+
+/* Reasoning body: expanded by default with internal scrolling */
+.thought-scroll-body { max-height: 22em; overflow-y: auto; padding-right: 4px; }
+/* Usage item: collapsed one-line summary with tokens and cost */
+details.usage > summary.usage-summary { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 2px 0; }
+details.usage > summary.usage-summary .message-actions { margin-left: auto; }
+details.usage > summary.usage-summary .usage-summary__cost { color: var(--vscode-descriptionForeground); }
+details.usage[open] > summary.usage-summary { margin-bottom: 6px; }
+details.usage > .usage-grid { margin-left: 16px; }

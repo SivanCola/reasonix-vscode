@@ -22,3 +22,11 @@ Thumbs.db
 # Scratch / agent working dirs (never committed)
 /tmp/
 /.codex/
+
+# Keep the packaged VSIX for easy installation
+!dist/
+!dist/reasonix-vscode.vsix
+dist/test/
+dist/extension.js
+dist/extension.js.map
+

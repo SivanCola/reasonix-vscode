@@ -75,6 +75,7 @@ type Snapshot = {
   sessions: SessionSummary[];
   mcp: McpSnapshot;
   availableCommands?: AvailableCommand[];
+  cnyPerUsd: number;
 };
 
 type RuntimeSelectOption = {
@@ -99,7 +100,7 @@ const MAX_EXPANDED_TRANSCRIPT_ITEMS = 1000;
 const vscode = acquireVsCodeApi();
 const transcript = mustElement("transcript");
 const settingsView = mustElement("settingsView");
-const prompt = mustElement("prompt") as HTMLTextAreaElement;
+const prompt = mustElement("prompt") as HTMLDivElement;
 const status = mustElement("status");
 const statusDot = mustElement("statusDot");
 const workspaceName = mustElement("workspaceName");
@@ -107,7 +108,6 @@ const toolbarMeta = mustElement("toolbarMeta");
 const send = mustElement("send") as HTMLButtonElement;
 const contextButton = mustElement("contextButton") as HTMLButtonElement;
 const contextMenu = mustElement("contextMenu");
-const attachmentTray = mustElement("attachmentTray");
 const collaborationButton = mustElement("collaborationButton") as HTMLButtonElement;
 const collaborationModeLabel = mustElement("collaborationModeLabel");
 const collaborationMenu = mustElement("collaborationMenu");
@@ -174,7 +174,215 @@ let suggestionState: SuggestionState = emptySuggestionState();
 let resourceSuggestionRequestId = 0;
 let pendingAttachments: PendingAttachment[] = [];
 
-prompt.value = persistedState.draft;
+if (persistedState.draft) {
+  prompt.textContent = persistedState.draft;
+  updatePromptEmptyClass();
+}
+
+// ---- Composer editor model -------------------------------------------------
+// The composer is a contenteditable element. Mention chips are
+// contenteditable=false inline elements that occupy exactly one placeholder
+// character in the text model, so cursor math and suggestion offsets stay
+// string-based while chips remain atomic and removable as a whole.
+
+const MENTION_CHIP_SELECTOR = "span.mention-chip";
+const MENTION_CHIP_PLACEHOLDER = "\uFFFC";
+
+function isMentionChipNode(node: Node | null): node is HTMLElement {
+  return node instanceof HTMLElement && node.matches(MENTION_CHIP_SELECTOR);
+}
+
+function promptText(): string {
+  let out = "";
+  for (const child of Array.from(prompt.childNodes)) {
+    if (isMentionChipNode(child)) {
+      out += MENTION_CHIP_PLACEHOLDER;
+    } else {
+      out += child.textContent ?? "";
+    }
+  }
+  return out;
+}
+
+function childTextLength(child: Node): number {
+  return isMentionChipNode(child) ? 1 : (child.textContent ?? "").length;
+}
+
+function indexOfChild(parent: Node, child: Node): number {
+  return Array.prototype.indexOf.call(parent.childNodes, child);
+}
+
+/** Maps a text-model offset to a DOM position inside the composer. */
+function domPositionForOffset(offset: number): { container: Node; offset: number } {
+  let remaining = offset;
+  for (const child of Array.from(prompt.childNodes)) {
+    if (isMentionChipNode(child)) {
+      if (remaining === 0) {
+        return { container: prompt, offset: indexOfChild(prompt, child) };
+      }
+      remaining -= 1;
+      continue;
+    }
+    const length = child.textContent?.length ?? 0;
+    if (remaining < length) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        return { container: child, offset: remaining };
+      }
+      // Nested element (browser-created <div>/<br>): descend one level.
+      const textNodes = Array.from(child.childNodes).filter((node) => node.nodeType === Node.TEXT_NODE);
+      if (textNodes.length === 0) {
+        return { container: child, offset: 0 };
+      }
+      let inner = remaining;
+      for (const textNode of textNodes) {
+        const innerLength = textNode.textContent?.length ?? 0;
+        if (inner < innerLength) {
+          return { container: textNode, offset: inner };
+        }
+        inner -= innerLength;
+      }
+      return { container: textNodes[textNodes.length - 1] ?? child, offset: textNodes[textNodes.length - 1]?.textContent?.length ?? 0 };
+    }
+    remaining -= length;
+  }
+  return { container: prompt, offset: prompt.childNodes.length };
+}
+
+/** Maps a DOM position inside the composer back to a text-model offset. */
+function offsetForDomPosition(container: Node, offset: number): number {
+  if (container === prompt) {
+    let total = 0;
+    const children = Array.from(prompt.childNodes);
+    for (let i = 0; i < offset && i < children.length; i += 1) {
+      total += childTextLength(children[i]);
+    }
+    return total;
+  }
+  let total = 0;
+  for (const child of Array.from(prompt.childNodes)) {
+    if (child === container) {
+      return total + offset;
+    }
+    if (isMentionChipNode(child)) {
+      total += 1;
+      continue;
+    }
+    if (child.contains(container)) {
+      // container is a nested text node inside child.
+      let inner = 0;
+      for (const textNode of Array.from(child.childNodes)) {
+        if (textNode === container) {
+          return total + inner + offset;
+        }
+        inner += textNode.textContent?.length ?? 0;
+      }
+      return total + inner + offset;
+    }
+    total += child.textContent?.length ?? 0;
+  }
+  return total + offset;
+}
+
+function promptOffsets(): { start: number; end: number } {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    const length = promptText().length;
+    return { start: length, end: length };
+  }
+  const range = selection.getRangeAt(0);
+  if (!prompt.contains(range.startContainer) && range.startContainer !== prompt) {
+    const length = promptText().length;
+    return { start: length, end: length };
+  }
+  return {
+    start: offsetForDomPosition(range.startContainer, range.startOffset),
+    end: offsetForDomPosition(range.endContainer, range.endOffset),
+  };
+}
+
+type PromptFragment = { kind: "text"; text: string } | { kind: "chip"; index: number };
+
+/** Replaces the [start, end) text-model range with the given fragments. */
+function insertPromptFragments(fragments: PromptFragment[], start: number, end: number): void {
+  const startPos = domPositionForOffset(start);
+  const endPos = domPositionForOffset(end);
+  const range = document.createRange();
+  range.setStart(startPos.container, startPos.offset);
+  range.setEnd(endPos.container, endPos.offset);
+  range.deleteContents();
+
+  // deleteContents() collapses the range to the deletion point, which stays
+  // valid even when the original containers were removed entirely.
+  let cursor = { container: range.startContainer, offset: range.startOffset };
+  for (const fragment of fragments) {
+    const node = fragment.kind === "chip"
+      ? renderMentionChip(fragment.index)
+      : document.createTextNode(fragment.text);
+    const insertRange = document.createRange();
+    insertRange.setStart(cursor.container, cursor.offset);
+    insertRange.collapse(true);
+    insertRange.insertNode(node);
+    cursor = positionAfterNode(node);
+  }
+  const selection = window.getSelection();
+  if (selection) {
+    const caret = document.createRange();
+    caret.setStart(cursor.container, cursor.offset);
+    caret.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(caret);
+  }
+}
+
+function positionAfterNode(node: Node): { container: Node; offset: number } {
+  const parent = node.parentNode;
+  if (!parent) {
+    return { container: prompt, offset: prompt.childNodes.length };
+  }
+  const next = node.nextSibling;
+  if (next) {
+    return { container: parent, offset: indexOfChild(parent, next) };
+  }
+  return { container: parent, offset: parent.childNodes.length };
+}
+
+function renderMentionChip(attachmentIndex: number): HTMLSpanElement {
+  const chip = document.createElement("span");
+  chip.className = "mention-chip";
+  chip.contentEditable = "false";
+  chip.dataset.attachmentIndex = String(attachmentIndex);
+  const attachment = pendingAttachments[attachmentIndex];
+  if (attachment) {
+    const range = attachment.startLine !== undefined && attachment.endLine !== undefined
+      ? ` L${attachment.startLine}-${attachment.endLine}`
+      : "";
+    chip.textContent = attachment.kind === "mention" && attachment.isDirectory
+      ? `${attachment.name}${range}`.replace(/\/+$/, "/")
+      : `${attachment.name}${range}`;
+    chip.title = attachment.kind === "mention"
+      ? `${attachment.relativePath ?? attachment.name}${range}`
+      : attachment.name;
+    chip.dataset.kind = attachment.kind;
+  }
+  return chip;
+}
+
+/** Re-syncs pendingAttachments with the chips currently in the DOM. */
+function syncAttachmentsFromDom(): void {
+  const chips = Array.from(prompt.querySelectorAll<HTMLElement>(MENTION_CHIP_SELECTOR));
+  const indexes = chips.map((chip) => Number(chip.dataset.attachmentIndex)).filter((index) => Number.isInteger(index) && index >= 0 && index < pendingAttachments.length);
+  if (indexes.length === chips.length && indexes.every((index, i) => chips[i].dataset.attachmentIndex === String(index))) {
+    return;
+  }
+  pendingAttachments = indexes.map((index) => pendingAttachments[index]).filter((attachment): attachment is PendingAttachment => attachment !== undefined);
+  chips.forEach((chip, i) => {
+    chip.dataset.attachmentIndex = String(i);
+  });
+}
+
+function updatePromptEmptyClass(): void {
+  prompt.classList.toggle("prompt-empty", promptText().trim() === "" && prompt.querySelectorAll(MENTION_CHIP_SELECTOR).length === 0);
+}
 
 type SuggestionState = {
   trigger?: ComposerTrigger;
@@ -217,6 +425,8 @@ prompt.addEventListener("compositionend", () => {
 });
 
 prompt.addEventListener("input", () => {
+  syncAttachmentsFromDom();
+  updatePromptEmptyClass();
   resizePrompt();
   updateSendButton(snapshot);
   updateComposerSuggestions();
@@ -464,17 +674,6 @@ contextMenu.addEventListener("keydown", (event) => {
   contextButton.focus();
 });
 
-attachmentTray.addEventListener("click", (event) => {
-  const button = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-remove-attachment]");
-  const index = Number(button?.dataset.removeAttachment);
-  if (Number.isInteger(index) && index >= 0 && index < pendingAttachments.length) {
-    pendingAttachments.splice(index, 1);
-    renderAttachmentTray();
-    updateSendButton(snapshot);
-    focusPromptSoon();
-  }
-});
-
 approvalModebar.addEventListener("click", (event) => {
   const mode = (event.target as Element | null)?.closest<HTMLButtonElement>("button[data-tool-approval-mode]")?.dataset.toolApprovalMode;
   if (isToolApprovalMode(mode)) {
@@ -518,6 +717,112 @@ approvalModebar.addEventListener("keydown", (event) => {
 
 sessionPopover.addEventListener("click", handleSessionClick);
 sessionRailList.addEventListener("click", handleSessionClick);
+
+// Drag and drop from the VS Code explorer (or the system file manager) into
+// the webview. VS Code synthesizes HTML5 drag events carrying the dropped
+// resources under the "resourceurls" / "codeeditors" DataTransfer types,
+// which we forward to the host for resolution.
+// NOTE: VS Code 1.91+ requires holding Shift while dragging into a webview.
+const DRAG_MIME_TYPES = ["resourceurls", "codeeditors", "text/uri-list", "application/vnd.code.resources"] as const;
+
+function extractUriStrings(raw: string): string[] {
+  // Line-based format (e.g. text/uri-list style).
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
+  if (lines.every((line) => line.startsWith("file:") || line.startsWith("vscode-remote:") || line.startsWith("vscode-webview:"))) {
+    return lines;
+  }
+  // JSON array format: strings or objects with a resource/uri field.
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      const uris: string[] = [];
+      for (const item of parsed) {
+        if (typeof item === "string") {
+          uris.push(item);
+          continue;
+        }
+        if (item && typeof item === "object") {
+          const candidate = (item as Record<string, unknown>).resource ?? (item as Record<string, unknown>).uri;
+          if (typeof candidate === "string") {
+            uris.push(candidate);
+          }
+        }
+      }
+      if (uris.length > 0) {
+        return uris;
+      }
+    }
+  } catch {
+    // Not JSON; fall through.
+  }
+  return [];
+}
+
+function droppedResourceUris(event: DragEvent): string[] {
+  const data = event.dataTransfer;
+  if (!data) {
+    return [];
+  }
+  try {
+    for (const mime of DRAG_MIME_TYPES) {
+      const raw = data.getData(mime);
+      if (!raw) {
+        continue;
+      }
+      const uris = extractUriStrings(raw);
+      if (uris.length > 0) {
+        return uris;
+      }
+    }
+  } catch {
+    // Ignore unreadable or malformed drag payloads.
+  }
+  return [];
+}
+
+function isResourceDrag(event: DragEvent): boolean {
+  const types = Array.from(event.dataTransfer?.types ?? []).map((type) => type.toLowerCase());
+  return types.some((type) => DRAG_MIME_TYPES.some((mime) => mime === type) || type === "files");
+}
+
+document.addEventListener("dragover", (event) => {
+  if (!isResourceDrag(event)) {
+    return;
+  }
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "copy";
+  }
+});
+
+/** Text-model offset under the mouse, when the drop lands inside the composer. */
+function dropOffsetInPrompt(event: DragEvent): number | undefined {
+  try {
+    const caret = document.caretRangeFromPoint(event.clientX, event.clientY);
+    if (caret && (prompt.contains(caret.startContainer) || caret.startContainer === prompt)) {
+      return offsetForDomPosition(caret.startContainer, caret.startOffset);
+    }
+  } catch {
+    // caretRangeFromPoint can throw in some browsers; fall through.
+  }
+  const element = document.elementFromPoint(event.clientX, event.clientY);
+  if (element && prompt.contains(element)) {
+    // Inside the composer but no caret: append at the end.
+    return promptText().length;
+  }
+  return undefined;
+}
+
+document.addEventListener("drop", (event) => {
+  const uris = droppedResourceUris(event);
+  if (uris.length === 0) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const offset = dropOffsetInPrompt(event);
+  vscode.postMessage({ command: "fileDrop", uris, ...(offset !== undefined ? { offset } : {}) });
+});
 
 window.addEventListener("resize", () => {
   if (controlsMenuOpen) {
@@ -766,6 +1071,15 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
       addAttachments(message.attachments);
       focusPromptSoon();
       return;
+    case "mentionsPicked":
+      if (message.offset !== undefined) {
+        insertAttachmentChips(message.attachments, message.offset, message.offset);
+      } else {
+        addAttachments(message.attachments);
+      }
+      focusPromptSoon();
+      vscode.postMessage({ command: "mentionsApplied", id: message.id });
+      return;
     case "resourceSuggestions":
       receiveResourceSuggestions(message.requestId, message.query, message.items);
       return;
@@ -859,11 +1173,10 @@ function render(state: Snapshot, refreshTranscript = false, refreshControls = tr
     contextButton.title = label("addContext");
     contextButton.setAttribute("aria-label", label("addContext"));
     composerHint.textContent = label("composerHint");
-    prompt.placeholder = label("placeholder");
+    prompt.dataset.placeholder = label("placeholder");
     collaborationButton.setAttribute("aria-expanded", String(collaborationMenuOpen));
     workModeButton.setAttribute("aria-expanded", String(workModeMenuOpen));
     updateModeUi();
-    renderAttachmentTray();
     renderMenus(state);
     renderSettings(state);
   }
@@ -943,14 +1256,47 @@ function patchTranscript(patch: TranscriptSplice<ChatItem>, oldLength: number, w
     return;
   }
 
+  // Preserve open state and scroll position of reasoning bodies that are
+  // about to be re-rendered by the streaming patch. Bodies that were at the
+  // bottom (or are brand new) keep following the stream; bodies the user
+  // scrolled up stay put until they scroll back down.
+  const removedIndexes: number[] = [];
+  const preservedThoughts = new Map<number, { open: boolean; scrollTop: number; followBottom: boolean }>();
   for (const node of Array.from(transcript.querySelectorAll<HTMLElement>("[data-transcript-item]"))) {
     const index = Number(node.dataset.itemIndex);
+    if (Number.isInteger(index) && index >= patch.start) {
+      removedIndexes.push(index);
+      const details = node.querySelector<HTMLDetailsElement>("details.thought-details");
+      const body = node.querySelector<HTMLElement>(".thought-scroll-body");
+      if (details) {
+        const followBottom = body ? body.scrollHeight - body.scrollTop - body.clientHeight < 8 : true;
+        preservedThoughts.set(index, { open: details.open, scrollTop: body?.scrollTop ?? 0, followBottom });
+      }
+    }
     if (!Number.isInteger(index) || index >= patch.start || index < renderedTranscriptStart) {
       node.remove();
     }
   }
   for (let index = Math.max(patch.start, renderedTranscriptStart); index < snapshot.items.length; index += 1) {
     transcript.append(renderItem(snapshot.items[index], index));
+  }
+  for (const index of removedIndexes) {
+    const node = transcript.querySelector<HTMLElement>(`[data-transcript-item][data-item-index="${index}"]`);
+    const details = node?.querySelector<HTMLDetailsElement>("details.thought-details");
+    const body = node?.querySelector<HTMLElement>(".thought-scroll-body");
+    if (!details) {
+      continue;
+    }
+    const preserved = preservedThoughts.get(index);
+    details.open = preserved?.open ?? true;
+    if (body) {
+      if (preserved?.followBottom ?? true) {
+        // Follow the stream: keep showing the newest content.
+        body.scrollTop = body.scrollHeight;
+      } else {
+        body.scrollTop = Math.min(preserved!.scrollTop, Math.max(0, body.scrollHeight - body.clientHeight));
+      }
+    }
   }
   appendTranscriptHistoryControl();
 
@@ -990,7 +1336,7 @@ function updateSendButton(state: Snapshot): void {
   send.textContent = state.running ? label("stop") : "↑";
   send.title = state.running ? label("stopTurn") : label("sendShortcut");
   send.classList.toggle("danger", state.running);
-  send.disabled = !state.running && prompt.value.trim() === "" && pendingAttachments.length === 0;
+  send.disabled = !state.running && promptText().trim() === "" && pendingAttachments.length === 0;
 }
 
 function renderConnectionNotice(state: Snapshot): void {
@@ -1010,11 +1356,12 @@ function renderConnectionNotice(state: Snapshot): void {
 }
 
 function insertComposerTrigger(token: "@" | "/"): void {
-  const start = prompt.selectionStart;
-  const end = prompt.selectionEnd;
-  const needsSpace = start > 0 && !/\s/.test(prompt.value[start - 1] ?? "");
-  prompt.setRangeText(`${needsSpace ? " " : ""}${token}`, start, end, "end");
+  const { start, end } = promptOffsets();
+  const text = promptText();
+  const needsSpace = start > 0 && !/\s/.test(text[start - 1] ?? "");
+  insertPromptFragments([{ kind: "text", text: `${needsSpace ? " " : ""}${token}` }], start, end);
   prompt.focus();
+  updatePromptEmptyClass();
   resizePrompt();
   updateSendButton(snapshot);
   updateComposerSuggestions();
@@ -1606,7 +1953,15 @@ function attachmentKey(attachment: PendingAttachment): string {
   return attachment.kind === "session" ? `session:${attachment.sessionId}` : `file:${attachment.uri}`;
 }
 
+/** Adds chips at the composer caret (or at the end when unfocused). */
 function addAttachments(attachments: PendingAttachment[]): void {
+  const { start } = promptOffsets();
+  insertAttachmentChips(attachments, start, start);
+}
+
+/** Inserts attachment chips at the given text-model offset. */
+function insertAttachmentChips(attachments: PendingAttachment[], start: number, end: number): void {
+  const fragments: PromptFragment[] = [];
   for (const attachment of attachments) {
     if (pendingAttachments.length >= MAX_ATTACHMENTS) {
       break;
@@ -1614,45 +1969,24 @@ function addAttachments(attachments: PendingAttachment[]): void {
     const key = attachmentKey(attachment);
     if (!pendingAttachments.some((existing) => attachmentKey(existing) === key)) {
       pendingAttachments.push(attachment);
+      fragments.push({ kind: "chip", index: pendingAttachments.length - 1 });
     }
   }
-  renderAttachmentTray();
+  if (fragments.length === 0) {
+    return;
+  }
+  insertPromptFragments(fragments, start, end);
+  updatePromptEmptyClass();
   updateSendButton(snapshot);
 }
 
 function clearAttachments(): void {
-  if (pendingAttachments.length === 0) {
-    return;
+  for (const chip of Array.from(prompt.querySelectorAll(MENTION_CHIP_SELECTOR))) {
+    chip.remove();
   }
   pendingAttachments = [];
-  renderAttachmentTray();
+  updatePromptEmptyClass();
   updateSendButton(snapshot);
-}
-
-function renderAttachmentTray(): void {
-  attachmentTray.textContent = "";
-  pendingAttachments.forEach((attachment, index) => {
-    const chip = document.createElement("span");
-    chip.className = `attachment-chip attachment-chip--${attachment.kind}`;
-    chip.title = attachment.name;
-    const icon = document.createElement("span");
-    icon.className = "attachment-chip__icon";
-    icon.textContent = attachment.kind === "session" ? "#" : attachment.kind === "image" ? "▦" : "≡";
-    icon.setAttribute("aria-hidden", "true");
-    const name = document.createElement("span");
-    name.className = "attachment-chip__name";
-    name.textContent = attachment.name;
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "attachment-chip__remove";
-    remove.dataset.removeAttachment = String(index);
-    remove.title = label("removeAttachment");
-    remove.setAttribute("aria-label", `${label("removeAttachment")}: ${attachment.name}`);
-    remove.textContent = "×";
-    chip.append(icon, name, remove);
-    attachmentTray.append(chip);
-  });
-  attachmentTray.hidden = pendingAttachments.length === 0;
 }
 
 function closeContextMenu(): void {
@@ -1995,6 +2329,7 @@ function renderMessage(item: Extract<ChatItem, { type: "message" }>, index: numb
 function renderThought(text: string, index: number): HTMLElement {
   const details = document.createElement("details");
   details.className = "thought-details";
+  details.open = true; // Reasoning summaries are expanded by default.
   const summary = document.createElement("summary");
   const title = document.createElement("span");
   title.className = "thought-title";
@@ -2004,7 +2339,7 @@ function renderThought(text: string, index: number): HTMLElement {
   preview.textContent = firstLine(text);
   summary.append(title, preview);
   const body = document.createElement("div");
-  body.className = "text markdown-host";
+  body.className = "text markdown-host thought-scroll-body";
   body.append(renderMarkdown(text));
   details.append(summary, body);
   const actions = messageActions({ type: "message", role: "thought", text }, index);
@@ -2214,12 +2549,22 @@ function renderPlan(item: Extract<ChatItem, { type: "plan" }>): HTMLElement {
 }
 
 function renderUsage(usage: UsageData, index: number): HTMLElement {
-  const node = document.createElement("section");
-  node.className = "item usage";
+  const details = document.createElement("details");
+  details.className = "item usage";
+  const summary = document.createElement("summary");
+  summary.className = "usage-summary";
+  const summaryTokens = document.createElement("span");
+  summaryTokens.className = "usage-summary__tokens";
+  summaryTokens.textContent = `${label("tokens")}: ${formatNumber(usage.totalTokens)}`;
+  const costLine = usageCostLine(usage);
+  const summaryCost = document.createElement("span");
+  summaryCost.className = "usage-summary__cost";
+  summaryCost.textContent = costLine ? ` · ${costLine}` : "";
   const actions = document.createElement("div");
   actions.className = "message-actions";
   actions.append(copyButton(stableStringify(usage), label("copy")));
-  node.append(renderItemHeader(label("usage"), actions));
+  summary.append(summaryTokens, summaryCost, actions);
+  details.append(summary);
   const text = document.createElement("div");
   text.className = "usage-grid";
   text.append(metric(label("tokens"), formatNumber(usage.totalTokens)));
@@ -2232,13 +2577,13 @@ function renderUsage(usage: UsageData, index: number): HTMLElement {
     text.append(metric(label("reasoning"), formatNumber(usage.reasoningTokens)));
   }
   if (usage.cost !== undefined) {
-    text.append(metric(label("cost"), `${usage.currency ?? ""}${usage.cost.toFixed(4)}`));
+    text.append(metric(label("cost"), usageCostLine(usage)));
   }
-  node.append(text);
+  details.append(text);
 
   if (usage.cacheDiagnostics) {
     const reasons = usage.cacheDiagnostics.prefixChangeReasons?.join("\n") ?? "";
-    node.append(
+    details.append(
       detailsBlock(
         label("cacheDiagnostics"),
         [
@@ -2255,8 +2600,21 @@ function renderUsage(usage: UsageData, index: number): HTMLElement {
     );
   }
 
-  node.dataset.itemIndex = String(index);
-  return node;
+  details.dataset.itemIndex = String(index);
+  return details;
+}
+
+/** Renders the cost line, converting USD to CNY with the configured rate. */
+function usageCostLine(usage: UsageData): string {
+  if (usage.cost === undefined || !Number.isFinite(usage.cost)) {
+    return "";
+  }
+  const currency = (usage.currency ?? "").trim().toUpperCase();
+  if (currency === "USD" || currency === "US$" || currency === "$" || currency === "") {
+    const rate = snapshot.cnyPerUsd;
+    return `¥${(usage.cost * rate).toFixed(4)}`;
+  }
+  return `${usage.currency ?? ""}${usage.cost.toFixed(4)}`;
 }
 
 function renderItemHeader(titleText: string, actions?: HTMLElement): HTMLElement {
@@ -2450,7 +2808,8 @@ function updateComposerSuggestions(): void {
     closeSuggestions();
     return;
   }
-  const trigger = getComposerTrigger(prompt.value, prompt.selectionStart, prompt.selectionEnd);
+  const { start, end } = promptOffsets();
+  const trigger = getComposerTrigger(promptText(), start, end);
   if (!trigger) {
     closeSuggestions();
     return;
@@ -2536,10 +2895,13 @@ function acceptSuggestion(index: number): void {
   if (!trigger || !item) {
     return;
   }
-  const next = replaceComposerTrigger(prompt.value, trigger, item.insertText);
-  prompt.value = next.value;
+  const text = promptText();
+  const next = replaceComposerTrigger(text, trigger, item.insertText);
+  // Only the trigger range changes; replace it in place so chips stay intact.
+  const inserted = next.value.slice(trigger.start, next.value.length - (text.length - trigger.end));
+  insertPromptFragments([{ kind: "text", text: inserted }], trigger.start, trigger.end);
   prompt.focus();
-  prompt.setSelectionRange(next.cursor, next.cursor);
+  updatePromptEmptyClass();
   resizePrompt();
   updateSendButton(snapshot);
   closeSuggestions();
@@ -2670,17 +3032,18 @@ function submitPrompt(): void {
     vscode.postMessage({ command: "cancel" });
     return;
   }
-  const text = prompt.value.trim();
+  const text = promptText().replaceAll(MENTION_CHIP_PLACEHOLDER, "").trim();
   if (text === "" && pendingAttachments.length === 0) {
     return;
   }
+  syncAttachmentsFromDom();
   const attachments = pendingAttachments;
   pendingAttachments = [];
   vscode.postMessage({ command: "sendPrompt", text, collaborationMode, tokenMode, toolApprovalMode, attachments });
-  prompt.value = "";
+  prompt.textContent = "";
+  updatePromptEmptyClass();
   schedulePersistedState();
   resizePrompt();
-  renderAttachmentTray();
   updateSendButton(snapshot);
   closeSuggestions();
 }
@@ -2703,7 +3066,7 @@ function schedulePersistedState(): void {
 function persistWebviewState(): void {
   vscode.setState({
     version: 1,
-    draft: prompt.value,
+    draft: promptText().replaceAll(MENTION_CHIP_PLACEHOLDER, ""),
     scrollTop: Math.max(0, Math.round(transcript.scrollTop)),
   } satisfies PersistedWebviewState);
 }
@@ -2766,6 +3129,7 @@ function emptySnapshot(): Snapshot {
     },
     sessions: [],
     mcp: { connected: [], configured: [], disconnected: [] },
+    cnyPerUsd: 7.2,
   };
 }
 
@@ -2804,6 +3168,7 @@ function normalizeSnapshot(value: unknown): Snapshot {
     sessions: Array.isArray(value.sessions) ? (value.sessions as SessionSummary[]).filter(isSessionSummary) : [],
     mcp: normalizeMcp(value.mcp),
     availableCommands: Array.isArray(value.availableCommands) ? value.availableCommands as AvailableCommand[] : undefined,
+    cnyPerUsd: typeof value.cnyPerUsd === "number" && Number.isFinite(value.cnyPerUsd) && value.cnyPerUsd > 0 ? value.cnyPerUsd : 7.2,
   };
 }
 
@@ -3381,7 +3746,7 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     placeholder: "Message Reasonix...",
     plan: "Plan",
     planDetail: "Read first, produce a plan, and wait before side effects.",
-    composerHint: "/ commands · @ files/folders",
+    composerHint: "/ commands · @ files/folders · drag files in, hold Shift to drop",
     pathPlaceholder: "Resolve from PATH",
     pickModel: "Pick model",
     read: "read",
@@ -3539,7 +3904,7 @@ const labels: Record<"en" | "zh", Record<LabelKey, string>> = {
     placeholder: "给 Reasonix 发消息...",
     plan: "计划",
     planDetail: "先只读分析并产出计划，确认前避免副作用。",
-    composerHint: "/ 命令 · @ 文件/文件夹",
+    composerHint: "/ 命令 · @ 文件/文件夹 · 拖文件进来后按住 Shift 松手",
     pathPlaceholder: "从 PATH 查找",
     pickModel: "选择模型",
     read: "读取",
