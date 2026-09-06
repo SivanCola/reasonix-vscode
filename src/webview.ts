@@ -6,6 +6,13 @@ import { shouldSubmitPromptOnKeydown } from "./keyboard";
 import { parseMarkdownBlocks } from "./markdown";
 import type { ResourceSuggestion } from "./resourceSuggestions";
 import { applyTranscriptSplice, transcriptWindowStart, type TranscriptSplice } from "./snapshotSync";
+import {
+  isAtBottom,
+  nextThoughtScrollTop,
+  shouldFollowLatest,
+  THOUGHT_BOTTOM_SLACK,
+  TRANSCRIPT_BOTTOM_SLACK,
+} from "./transcriptScroll";
 import type { HostToWebviewMessage } from "./webviewProtocol";
 
 declare function acquireVsCodeApi(): {
@@ -173,6 +180,12 @@ let compositionActive = false;
 let suggestionState: SuggestionState = emptySuggestionState();
 let resourceSuggestionRequestId = 0;
 let pendingAttachments: PendingAttachment[] = [];
+let forceFollowLatest = false;
+/** Transcript indexes whose reasoning body the reader collapsed. */
+const collapsedThoughts = new Set<number>();
+/** Transcript index -> scroll offset the reader parked a reasoning body at, instead of following it. */
+const detachedThoughts = new Map<number, number>();
+let thoughtStateSessionId: string | undefined;
 
 prompt.value = persistedState.draft;
 
@@ -224,6 +237,48 @@ prompt.addEventListener("input", () => {
 });
 
 transcript.addEventListener("scroll", schedulePersistedState, { passive: true });
+
+// `toggle` and inner `scroll` do not bubble, so reasoning state is tracked from the capture phase.
+// Keeping it outside the DOM lets it survive the re-renders a streaming turn triggers.
+transcript.addEventListener(
+  "toggle",
+  (event) => {
+    const details = event.target;
+    if (!(details instanceof HTMLDetailsElement) || !details.classList.contains("thought-details")) {
+      return;
+    }
+    const index = Number(details.dataset.thoughtIndex);
+    if (!Number.isInteger(index)) {
+      return;
+    }
+    if (details.open) {
+      collapsedThoughts.delete(index);
+    } else {
+      collapsedThoughts.add(index);
+    }
+  },
+  true,
+);
+
+transcript.addEventListener(
+  "scroll",
+  (event) => {
+    const body = event.target;
+    if (!(body instanceof HTMLElement) || !body.classList.contains("thought-scroll-body")) {
+      return;
+    }
+    const index = Number(body.dataset.thoughtIndex);
+    if (!Number.isInteger(index)) {
+      return;
+    }
+    if (isAtBottom(body, THOUGHT_BOTTOM_SLACK)) {
+      detachedThoughts.delete(index);
+    } else {
+      detachedThoughts.set(index, body.scrollTop);
+    }
+  },
+  { capture: true, passive: true },
+);
 
 prompt.addEventListener("click", () => {
   updateComposerSuggestions();
@@ -308,16 +363,7 @@ settingsButton.addEventListener("click", () => {
   runtimeMenuOpen = undefined;
   render(snapshot);
 });
-settingsBackButton.addEventListener("click", () => {
-  settingsOpen = false;
-  sessionMenuOpen = false;
-  collaborationMenuOpen = false;
-  workModeMenuOpen = false;
-  controlsMenuOpen = false;
-  contextMenuOpen = false;
-  runtimeMenuOpen = undefined;
-  render(snapshot);
-});
+settingsBackButton.addEventListener("click", closeSettings);
 
 collaborationButton.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -634,14 +680,7 @@ settingsView.addEventListener("click", (event) => {
 
   const action = target?.closest<HTMLButtonElement>("button[data-settings-action]")?.dataset.settingsAction;
   if (action === "close") {
-    settingsOpen = false;
-    sessionMenuOpen = false;
-    collaborationMenuOpen = false;
-    workModeMenuOpen = false;
-    controlsMenuOpen = false;
-    contextMenuOpen = false;
-    runtimeMenuOpen = undefined;
-    render(snapshot);
+    closeSettings();
     return;
   }
   if (action === "pickModel") {
@@ -780,7 +819,13 @@ window.addEventListener("message", (event: MessageEvent<HostToWebviewMessage>) =
 requestFullSnapshot();
 
 function render(state: Snapshot, refreshTranscript = false, refreshControls = true): void {
-  const shouldStickToBottom = refreshTranscript && !settingsOpen && (state.running || transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80);
+  forgetThoughtStateOnSessionChange(state.sessionId);
+  // Sampled before the transcript is rebuilt, while the geometry still reflects what the reader sees.
+  const shouldStickToBottom = refreshTranscript && shouldFollowLatest({
+    atBottom: isAtBottom(transcript, TRANSCRIPT_BOTTOM_SLACK),
+    forced: consumeForcedFollow(),
+    settingsOpen,
+  });
 
   status.textContent = state.disconnected ? label("disconnected") : state.status;
   status.title = state.workspace;
@@ -872,11 +917,7 @@ function render(state: Snapshot, refreshTranscript = false, refreshControls = tr
     renderTranscriptWindow(state);
   }
 
-  if (refreshTranscript && shouldStickToBottom) {
-    requestAnimationFrame(() => {
-      transcript.scrollTop = transcript.scrollHeight;
-    });
-  }
+  scrollToLatest(shouldStickToBottom);
   resizePrompt();
 }
 
@@ -917,12 +958,23 @@ function renderTranscriptWindow(state: Snapshot): void {
   }
   renderedTranscriptStart = Math.min(renderedTranscriptStart, transcriptWindowStart(state.items.length, 1));
   appendTranscriptHistoryControl();
+  let latest: HTMLElement | undefined;
   for (let index = renderedTranscriptStart; index < state.items.length; index += 1) {
-    transcript.append(renderItem(state.items[index], index));
+    latest = renderItem(state.items[index], index);
+    transcript.append(latest);
   }
+  // Older reasoning keeps its natural position; only the newest one may still be streaming.
+  latest && syncThoughtScroll(latest);
 }
 
 function patchTranscript(patch: TranscriptSplice<ChatItem>, oldLength: number, wasFollowingLatest: boolean): void {
+  // Sampled before the patch lands, while the geometry still reflects what the reader sees.
+  const followLatest = shouldFollowLatest({
+    atBottom: isAtBottom(transcript, TRANSCRIPT_BOTTOM_SLACK),
+    forced: consumeForcedFollow(),
+    settingsOpen,
+  });
+
   if (snapshot.items.length === 0) {
     renderTranscriptWindow(snapshot);
     return;
@@ -939,7 +991,9 @@ function patchTranscript(patch: TranscriptSplice<ChatItem>, oldLength: number, w
   );
 
   if (patch.start < renderedTranscriptStart || !transcript.querySelector("[data-transcript-item]")) {
+    // Rebuilding the window drops the scroll offset, so re-pin it for a reader who was at the bottom.
     renderTranscriptWindow(snapshot);
+    scrollToLatest(followLatest);
     return;
   }
 
@@ -949,16 +1003,54 @@ function patchTranscript(patch: TranscriptSplice<ChatItem>, oldLength: number, w
       node.remove();
     }
   }
+  const replaced: HTMLElement[] = [];
   for (let index = Math.max(patch.start, renderedTranscriptStart); index < snapshot.items.length; index += 1) {
-    transcript.append(renderItem(snapshot.items[index], index));
+    const node = renderItem(snapshot.items[index], index);
+    transcript.append(node);
+    replaced.push(node);
   }
   appendTranscriptHistoryControl();
-
-  if (snapshot.running || transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80) {
-    requestAnimationFrame(() => {
-      transcript.scrollTop = transcript.scrollHeight;
-    });
+  // Streaming re-renders the reasoning body from scratch, so put it back where the reader left it.
+  for (const node of replaced) {
+    syncThoughtScroll(node);
   }
+  scrollToLatest(followLatest);
+}
+
+function scrollToLatest(follow: boolean): void {
+  if (!follow) {
+    return;
+  }
+  requestAnimationFrame(() => {
+    transcript.scrollTop = transcript.scrollHeight;
+  });
+}
+
+/** Reasoning state is keyed by transcript index, which only means something within one session. */
+function forgetThoughtStateOnSessionChange(sessionId: string | undefined): void {
+  if (sessionId === thoughtStateSessionId) {
+    return;
+  }
+  thoughtStateSessionId = sessionId;
+  collapsedThoughts.clear();
+  detachedThoughts.clear();
+}
+
+/** Pins a re-rendered reasoning body to the newest text, unless the reader scrolled up inside it. */
+function syncThoughtScroll(node: HTMLElement): void {
+  const body = node.querySelector<HTMLElement>(".thought-scroll-body");
+  const index = Number(body?.dataset.thoughtIndex);
+  if (!body || !Number.isInteger(index)) {
+    return;
+  }
+  const parked = detachedThoughts.get(index);
+  body.scrollTop = nextThoughtScrollTop(body, { follow: parked === undefined, scrollTop: parked ?? 0 });
+}
+
+function consumeForcedFollow(): boolean {
+  const forced = forceFollowLatest;
+  forceFollowLatest = false;
+  return forced;
 }
 
 function appendTranscriptHistoryControl(): void {
@@ -1995,6 +2087,9 @@ function renderMessage(item: Extract<ChatItem, { type: "message" }>, index: numb
 function renderThought(text: string, index: number): HTMLElement {
   const details = document.createElement("details");
   details.className = "thought-details";
+  details.dataset.thoughtIndex = String(index);
+  // Reasoning streams in live, so it stays expanded unless the reader collapsed it.
+  details.open = !collapsedThoughts.has(index);
   const summary = document.createElement("summary");
   const title = document.createElement("span");
   title.className = "thought-title";
@@ -2004,7 +2099,8 @@ function renderThought(text: string, index: number): HTMLElement {
   preview.textContent = firstLine(text);
   summary.append(title, preview);
   const body = document.createElement("div");
-  body.className = "text markdown-host";
+  body.className = "text markdown-host thought-scroll-body";
+  body.dataset.thoughtIndex = String(index);
   body.append(renderMarkdown(text));
   details.append(summary, body);
   const actions = messageActions({ type: "message", role: "thought", text }, index);
@@ -2665,6 +2761,19 @@ function saveTextSetting(key: "binaryPath" | "model"): void {
   updateSetting(key, input.value);
 }
 
+function closeSettings(): void {
+  settingsOpen = false;
+  sessionMenuOpen = false;
+  collaborationMenuOpen = false;
+  workModeMenuOpen = false;
+  controlsMenuOpen = false;
+  contextMenuOpen = false;
+  runtimeMenuOpen = undefined;
+  // Hiding the transcript drops its scroll offset, so a live turn re-pins to the newest output.
+  forceFollowLatest = forceFollowLatest || snapshot.running;
+  render(snapshot);
+}
+
 function submitPrompt(): void {
   if (snapshot.running) {
     vscode.postMessage({ command: "cancel" });
@@ -2676,6 +2785,8 @@ function submitPrompt(): void {
   }
   const attachments = pendingAttachments;
   pendingAttachments = [];
+  // Sending is an explicit request for the newest output, wherever the reader was scrolled to.
+  forceFollowLatest = true;
   vscode.postMessage({ command: "sendPrompt", text, collaborationMode, tokenMode, toolApprovalMode, attachments });
   prompt.value = "";
   schedulePersistedState();

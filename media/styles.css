@@ -567,6 +567,17 @@ pre {
   margin-top: 6px;
 }
 
+.thought-details[open] .thought-preview {
+  display: none;
+}
+
+/* Streaming reasoning stays visible without pushing the rest of the turn off screen. */
+.thought-scroll-body {
+  max-height: 22em;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
 .thought-actions {
   margin-top: 4px;
 }

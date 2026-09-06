@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Stopped a running turn from dragging the transcript back to the bottom, so the chat can be scrolled and read while the model is still streaming. Auto-follow now resumes when the reader returns to the newest output, and sending a prompt still jumps to it.
+- Made reasoning summaries readable while they stream: they expand by default into a height-capped, internally scrolling body that follows the newest text, and the collapse state and scroll position survive the re-render every streaming update triggers.
+
 ## 0.3.2
 
 - Removed repeated editor-context confirmation dialogs. The visible composer context mode now controls automatic context inclusion, while explicit `Send Selection` actions attach the current selection or cursor window directly.
